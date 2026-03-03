@@ -160,15 +160,13 @@ class FuturesBackend(BaseTaskBackend):
         """
         from .models import DBTaskResult
 
-        from django.db import connection
-
         recovered = 0
         with transaction.atomic():
-            qs = DBTaskResult.objects.orphaned().filter(backend_name=self.alias)
-            if connection.features.has_select_for_update_skip_locked:
-                orphaned = qs.select_for_update(skip_locked=True)
-            else:
-                orphaned = qs
+            orphaned = (
+                DBTaskResult.objects.orphaned()
+                .filter(backend_name=self.alias)
+                .select_for_update(skip_locked=True)
+            )
             for db_result in orphaned:
                 result_id = str(db_result.id)
                 db_result.claim(self._worker_id)

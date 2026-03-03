@@ -50,17 +50,6 @@ class DBTaskResultQuerySet(models.QuerySet):
         """Tasks that are READY or RUNNING — candidates for recovery."""
         return self.filter(status__in=[TaskResultStatus.READY, TaskResultStatus.RUNNING])
 
-    def get_locked(self):
-        """Claim a single task using SELECT ... FOR UPDATE SKIP LOCKED.
-
-        Falls back to a plain first() on backends that don't support
-        select_for_update (e.g., SQLite).
-        """
-        from django.db import connection
-
-        if connection.features.has_select_for_update_skip_locked:
-            return self.select_for_update(skip_locked=True).first()
-        return self.first()
 
 
 class DBTaskResult(models.Model):
