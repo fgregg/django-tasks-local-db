@@ -11,6 +11,8 @@ DATABASES = {
 }
 
 INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
     "django.contrib.contenttypes",
     "django_tasks_local_db",
 ]

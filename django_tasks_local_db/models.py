@@ -3,6 +3,7 @@ import logging
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import SuspiciousOperation
 from django.db import models
 from django.db.models import F, Q
 from django.tasks.base import (
@@ -17,6 +18,7 @@ from django.tasks.base import (
 )
 from django.utils import timezone
 from django.utils.module_loading import import_string
+from django.utils.translation import gettext_lazy as _
 
 from .utils import retry
 
@@ -52,32 +54,55 @@ class DBTaskResultQuerySet(models.QuerySet):
         """Tasks that are READY or RUNNING — candidates for recovery."""
         return self.filter(status__in=[TaskResultStatus.READY, TaskResultStatus.RUNNING])
 
+    def successful(self):
+        return self.filter(status=TaskResultStatus.SUCCESSFUL)
+
+    def failed(self):
+        return self.filter(status=TaskResultStatus.FAILED)
+
+    def finished(self):
+        return self.filter(
+            status__in=[TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED]
+        )
 
 
 class DBTaskResult(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name=_("id")
+    )
     status = models.CharField(
         choices=TaskResultStatus.choices,
         default=TaskResultStatus.READY,
         max_length=max(len(value) for value in TaskResultStatus.values),
+        verbose_name=_("status"),
     )
-    enqueued_at = models.DateTimeField(auto_now_add=True)
-    started_at = models.DateTimeField(null=True)
-    finished_at = models.DateTimeField(null=True)
-    args_kwargs = models.JSONField()
-    priority = models.IntegerField(default=DEFAULT_TASK_PRIORITY)
-    task_path = models.TextField()
-    worker_ids = models.JSONField(default=list)
-    queue_name = models.CharField(default=DEFAULT_TASK_QUEUE_NAME, max_length=32)
-    backend_name = models.CharField(max_length=32)
-    run_after = models.DateTimeField(default=_get_date_max)
-    return_value = models.JSONField(default=None, null=True)
-    exception_class_path = models.TextField(default="")
-    traceback = models.TextField(default="")
+    enqueued_at = models.DateTimeField(auto_now_add=True, verbose_name=_("enqueued at"))
+    started_at = models.DateTimeField(null=True, verbose_name=_("started at"))
+    finished_at = models.DateTimeField(null=True, verbose_name=_("finished at"))
+    args_kwargs = models.JSONField(verbose_name=_("args kwargs"))
+    priority = models.IntegerField(
+        default=DEFAULT_TASK_PRIORITY, verbose_name=_("priority")
+    )
+    task_path = models.TextField(verbose_name=_("task path"))
+    worker_ids = models.JSONField(default=list, verbose_name=_("worker ids"))
+    queue_name = models.CharField(
+        default=DEFAULT_TASK_QUEUE_NAME, max_length=32, verbose_name=_("queue name")
+    )
+    backend_name = models.CharField(max_length=32, verbose_name=_("backend name"))
+    run_after = models.DateTimeField(null=True, verbose_name=_("run after"))
+    return_value = models.JSONField(
+        default=None, null=True, verbose_name=_("return value")
+    )
+    exception_class_path = models.TextField(
+        default="", verbose_name=_("exception class path")
+    )
+    traceback = models.TextField(default="", verbose_name=_("traceback"))
 
     objects = DBTaskResultQuerySet.as_manager()
 
     class Meta:
+        verbose_name = _("task result")
+        verbose_name_plural = _("task results")
         ordering = [F("priority").desc(), F("run_after").asc()]
         indexes = [
             models.Index(
@@ -88,6 +113,7 @@ class DBTaskResult(models.Model):
                 condition=Q(status=TaskResultStatus.READY),
             ),
             models.Index(fields=["backend_name"]),
+            models.Index(fields=["queue_name"]),
         ]
         constraints = [
             models.CheckConstraint(
@@ -100,10 +126,17 @@ class DBTaskResult(models.Model):
         ]
 
     @property
+    def task_name(self) -> str:
+        try:
+            return self.task.name
+        except (ImportError, SuspiciousOperation):
+            return self.task_path
+
+    @property
     def task(self) -> Task:
         task_obj = import_string(self.task_path)
         if not isinstance(task_obj, Task):
-            raise ValueError(
+            raise SuspiciousOperation(
                 f"Task {self.id} does not point to a Task ({self.task_path})"
             )
         return task_obj.using(

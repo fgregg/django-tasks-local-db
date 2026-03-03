@@ -13,6 +13,8 @@ class DjangoTasksLocalDbConfig(AppConfig):
     def ready(self):
         import threading
 
+        from . import signal_handlers  # noqa: F401
+
         # Defer recovery until after Django is fully initialized.
         # This avoids "database accessed during app initialization" warnings
         # and ensures the task backends are fully configured.
