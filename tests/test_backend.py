@@ -5,8 +5,8 @@ import pytest
 from django.tasks import TaskResultStatus, task_backends
 from django.tasks.exceptions import TaskResultDoesNotExist
 
-from django_tasks_local_db.models import DBTaskResult
-from tests.tasks import add_numbers, failing_task
+from django_tasks_local_db.models import DBTaskResult, _get_date_max
+from tests.tasks import add_numbers, failing_task, get_task_id
 
 
 @pytest.fixture
@@ -87,6 +87,9 @@ def test_recover_orphaned_tasks(backend):
         task_path="tests.tasks.add_numbers",
         queue_name="default",
         backend_name="default",
+        run_after=_get_date_max(),
+        exception_class_path="",
+        traceback="",
     )
 
     recovered = backend.recover_tasks()
@@ -114,6 +117,9 @@ def test_recover_running_tasks(backend):
         task_path="tests.tasks.add_numbers",
         queue_name="default",
         backend_name="default",
+        run_after=_get_date_max(),
+        exception_class_path="",
+        traceback="",
         status=TaskResultStatus.RUNNING,
         started_at=timezone.now(),
     )
@@ -133,19 +139,9 @@ def test_recover_running_tasks(backend):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_process_pool_rejects_unpickleable_args(settings):
-    from asgiref.local import Local
+def test_takes_context(backend):
+    result = get_task_id.enqueue()
+    _wait_for_result(result)
 
-    settings.TASKS = {
-        "default": {
-            "BACKEND": "django_tasks_local_db.ProcessPoolBackend",
-            "OPTIONS": {"MAX_WORKERS": 1},
-        }
-    }
-    task_backends._connections = Local()
-    pp_backend = task_backends["default"]
-
-    with pytest.raises(ValueError, match="pickleable"):
-        add_numbers.enqueue(lambda: None, 1)
-
-    pp_backend.close()
+    assert result.status == TaskResultStatus.SUCCESSFUL
+    assert result.return_value == result.id

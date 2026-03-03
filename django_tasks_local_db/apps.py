@@ -27,7 +27,7 @@ class DjangoTasksLocalDbConfig(AppConfig):
         # Brief delay to ensure Django startup completes
         time.sleep(0.5)
 
-        from .backend import FuturesBackend
+        from .backend import LocalDBBackend
 
         tasks_settings = getattr(settings, "TASKS", {})
         for alias, params in tasks_settings.items():
@@ -38,7 +38,7 @@ class DjangoTasksLocalDbConfig(AppConfig):
                 from django.tasks import task_backends
 
                 backend = task_backends[alias]
-                if isinstance(backend, FuturesBackend):
+                if isinstance(backend, LocalDBBackend):
                     recovered = backend.recover_tasks()
                     if recovered:
                         logger.info(

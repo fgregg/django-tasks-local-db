@@ -18,6 +18,8 @@ from django.tasks.base import (
 from django.utils import timezone
 from django.utils.module_loading import import_string
 
+from .utils import retry
+
 logger = logging.getLogger("django_tasks_local_db")
 
 
@@ -137,12 +139,14 @@ class DBTaskResult(models.Model):
         object.__setattr__(task_result, "_return_value", self.return_value)
         return task_result
 
+    @retry()
     def claim(self, worker_id: str) -> None:
         self.status = TaskResultStatus.RUNNING
         self.started_at = timezone.now()
         self.worker_ids = [*self.worker_ids, worker_id]
         self.save(update_fields=["status", "started_at", "worker_ids"])
 
+    @retry()
     def set_successful(self, return_value) -> None:
         self.status = TaskResultStatus.SUCCESSFUL
         self.finished_at = timezone.now()
@@ -159,6 +163,7 @@ class DBTaskResult(models.Model):
             ]
         )
 
+    @retry()
     def set_failed(self, exc: BaseException) -> None:
         self.status = TaskResultStatus.FAILED
         self.finished_at = timezone.now()
