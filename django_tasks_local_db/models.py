@@ -1,8 +1,6 @@
-import datetime
 import logging
 import uuid
 
-from django.conf import settings
 from django.core.exceptions import SuspiciousOperation
 from django.db import models
 from django.db.models import F, Q
@@ -35,17 +33,9 @@ def _get_exception_traceback(exc):
     return "".join(format_exception(exc))
 
 
-def _get_date_max():
-    return datetime.datetime(
-        9999, 1, 1, tzinfo=datetime.timezone.utc if settings.USE_TZ else None
-    )
-
-
 class DBTaskResultQuerySet(models.QuerySet):
     def ready(self):
-        return self.filter(status=TaskResultStatus.READY).filter(
-            Q(run_after=_get_date_max()) | Q(run_after__lte=timezone.now())
-        )
+        return self.filter(status=TaskResultStatus.READY)
 
     def running(self):
         return self.filter(status=TaskResultStatus.RUNNING)
@@ -89,7 +79,6 @@ class DBTaskResult(models.Model):
         default=DEFAULT_TASK_QUEUE_NAME, max_length=32, verbose_name=_("queue name")
     )
     backend_name = models.CharField(max_length=32, verbose_name=_("backend name"))
-    run_after = models.DateTimeField(null=True, verbose_name=_("run after"))
     return_value = models.JSONField(
         default=None, null=True, verbose_name=_("return value")
     )
@@ -103,12 +92,12 @@ class DBTaskResult(models.Model):
     class Meta:
         verbose_name = _("task result")
         verbose_name_plural = _("task results")
-        ordering = [F("priority").desc(), F("run_after").asc()]
+        ordering = [F("priority").desc(), "enqueued_at"]
         indexes = [
             models.Index(
                 "status",
                 F("priority").desc(),
-                F("run_after").asc(),
+                "enqueued_at",
                 name="local_db_ready_idx",
                 condition=Q(status=TaskResultStatus.READY),
             ),
@@ -142,7 +131,6 @@ class DBTaskResult(models.Model):
         return task_obj.using(
             priority=self.priority,
             queue_name=self.queue_name,
-            run_after=None if self.run_after == _get_date_max() else self.run_after,
             backend=self.backend_name,
         )
 

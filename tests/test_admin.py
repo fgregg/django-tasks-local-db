@@ -4,10 +4,10 @@ import time
 
 import pytest
 from django.contrib.admin.sites import AdminSite
-from django.tasks import TaskResultStatus, task_backends
+from django.tasks import task_backends
 
 from django_tasks_local_db.admin import DBTaskResultAdmin
-from django_tasks_local_db.models import DBTaskResult, _get_date_max
+from django_tasks_local_db.models import DBTaskResult
 
 from .tasks import add_numbers, failing_task
 

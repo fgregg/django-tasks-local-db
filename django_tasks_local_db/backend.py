@@ -73,7 +73,7 @@ class LocalDBBackend(BaseTaskBackend):
         return self._state
 
     def enqueue(self, task: Task, args=None, kwargs=None):
-        from .models import DBTaskResult, _get_date_max
+        from .models import DBTaskResult
 
         self.validate_task(task)
 
@@ -85,7 +85,6 @@ class LocalDBBackend(BaseTaskBackend):
             priority=task.priority,
             task_path=func_path,
             queue_name=task.queue_name,
-            run_after=task.run_after if task.run_after is not None else _get_date_max(),
             backend_name=self.alias,
             exception_class_path="",
             traceback="",

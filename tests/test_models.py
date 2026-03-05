@@ -1,4 +1,4 @@
-"""Tests for model properties, QuerySet methods, and signal handlers."""
+"""Tests for model properties, QuerySet methods, and admin."""
 
 import time
 
@@ -6,7 +6,7 @@ import pytest
 from django.core.exceptions import SuspiciousOperation
 from django.tasks import TaskResultStatus, task_backends
 
-from django_tasks_local_db.models import DBTaskResult, _get_date_max
+from django_tasks_local_db.models import DBTaskResult
 
 from .tasks import add_numbers, failing_task
 
@@ -45,7 +45,6 @@ def test_task_name_falls_back_to_task_path_on_import_error(backend):
         task_path="nonexistent.module.task_func",
         queue_name="default",
         backend_name="default",
-        run_after=_get_date_max(),
     )
     assert db_row.task_name == "nonexistent.module.task_func"
 
@@ -61,7 +60,6 @@ def test_task_property_raises_suspicious_operation_for_non_task(backend):
         task_path="os.path.join",  # valid import, but not a Task
         queue_name="default",
         backend_name="default",
-        run_after=_get_date_max(),
     )
     with pytest.raises(SuspiciousOperation, match="does not point to a Task"):
         db_row.task
@@ -97,47 +95,11 @@ def test_queryset_finished_excludes_ready():
         task_path="tests.tasks.add_numbers",
         queue_name="default",
         backend_name="default",
-        run_after=_get_date_max(),
         status=TaskResultStatus.READY,
     )
     assert not DBTaskResult.objects.finished().filter(id=db_row.id).exists()
     assert not DBTaskResult.objects.successful().filter(id=db_row.id).exists()
     assert not DBTaskResult.objects.failed().filter(id=db_row.id).exists()
-
-
-# --- pre_save signal handler ---
-
-
-@pytest.mark.django_db(transaction=True)
-def test_pre_save_sets_run_after_when_none():
-    """Signal handler should set run_after to date_max when None."""
-    db_row = DBTaskResult.objects.create(
-        args_kwargs={"args": [], "kwargs": {}},
-        task_path="tests.tasks.add_numbers",
-        queue_name="default",
-        backend_name="default",
-        run_after=None,
-    )
-    db_row.refresh_from_db()
-    assert db_row.run_after == _get_date_max()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_pre_save_preserves_explicit_run_after():
-    """Signal handler should not overwrite an explicit run_after value."""
-    from django.utils import timezone
-
-    explicit_time = timezone.now()
-    db_row = DBTaskResult.objects.create(
-        args_kwargs={"args": [], "kwargs": {}},
-        task_path="tests.tasks.add_numbers",
-        queue_name="default",
-        backend_name="default",
-        run_after=explicit_time,
-    )
-    db_row.refresh_from_db()
-    # Compare to the second (DateTimeField may truncate microseconds on some DBs)
-    assert abs((db_row.run_after - explicit_time).total_seconds()) < 1
 
 
 # --- Meta verbose names ---

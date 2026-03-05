@@ -5,7 +5,7 @@ import pytest
 from django.tasks import TaskResultStatus, task_backends
 from django.tasks.exceptions import TaskResultDoesNotExist
 
-from django_tasks_local_db.models import DBTaskResult, _get_date_max
+from django_tasks_local_db.models import DBTaskResult
 from tests.tasks import add_numbers, failing_task, get_task_id
 
 
@@ -87,7 +87,6 @@ def test_recover_orphaned_tasks(backend):
         task_path="tests.tasks.add_numbers",
         queue_name="default",
         backend_name="default",
-        run_after=_get_date_max(),
         exception_class_path="",
         traceback="",
     )
@@ -117,7 +116,6 @@ def test_recover_running_tasks(backend):
         task_path="tests.tasks.add_numbers",
         queue_name="default",
         backend_name="default",
-        run_after=_get_date_max(),
         exception_class_path="",
         traceback="",
         status=TaskResultStatus.RUNNING,

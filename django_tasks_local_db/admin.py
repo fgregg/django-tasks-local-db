@@ -28,7 +28,6 @@ class DBTaskResultAdmin(admin.ModelAdmin):
         "priority",
         "queue_name",
         "backend_name",
-        "run_after",
         "args_kwargs",
         "return_value",
         "exception_class_path",
