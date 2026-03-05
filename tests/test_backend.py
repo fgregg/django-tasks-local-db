@@ -106,6 +106,34 @@ def test_recover_orphaned_tasks(backend):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_get_result_after_recover(backend):
+    """Regression test for #1: get_result must work on recovered tasks."""
+    db_result = DBTaskResult.objects.create(
+        args_kwargs={"args": [50, 50], "kwargs": {}},
+        priority=0,
+        task_path="tests.tasks.add_numbers",
+        queue_name="default",
+        backend_name="default",
+        exception_class_path="",
+        traceback="",
+    )
+
+    recovered = backend.recover_tasks()
+    assert recovered == 1
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        db_result.refresh_from_db()
+        if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+            break
+        time.sleep(0.05)
+
+    result = add_numbers.get_result(str(db_result.id))
+    assert result.status == TaskResultStatus.SUCCESSFUL
+    assert result.return_value == 100
+
+
+@pytest.mark.django_db(transaction=True)
 def test_recover_running_tasks(backend):
     """Tasks left in RUNNING state should also be recovered."""
     from django.utils import timezone
