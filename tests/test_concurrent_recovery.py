@@ -6,12 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import pytest
-from django.db import connection
 from django.tasks import TaskResultStatus, task_backends
 
 from django_tasks_local_db.models import DBTaskResult
-
-_supports_skip_locked = connection.features.has_select_for_update_skip_locked
 
 
 @pytest.fixture
@@ -45,10 +42,6 @@ def _create_orphans(n=5, task_path="tests.tasks.add_numbers", args=None):
     return orphans
 
 
-@pytest.mark.skipif(
-    not _supports_skip_locked,
-    reason="Database does not support select_for_update(skip_locked=True)",
-)
 @pytest.mark.django_db(transaction=True)
 def test_concurrent_recovery_no_double_execution(backend):
     """Two concurrent recover_tasks() calls should not double-execute tasks.
@@ -57,9 +50,6 @@ def test_concurrent_recovery_no_double_execution(backend):
     sleep, holding row locks while the second thread evaluates its
     SELECT FOR UPDATE SKIP LOCKED.
     """
-    # Use slow tasks so they're still RUNNING when the second thread queries.
-    # On SQLite, writes serialize — Thread 2 starts after Thread 1 commits.
-    # If tasks complete before Thread 2 queries, there's nothing to double-claim.
     orphans = _create_orphans(5, task_path="tests.tasks.slow_task", args=[2])
 
     first_claim_done = threading.Event()
@@ -84,17 +74,73 @@ def test_concurrent_recovery_no_double_execution(backend):
 
     total_recovered = recovered1 + recovered2
 
-    # Each task should be recovered exactly once — no double execution.
-    # Requires a database with row-level locking (PostgreSQL, MySQL).
-    # On SQLite, skip_locked is ignored, so this assertion will fail.
     assert total_recovered == 5, (
         f"Expected 5 (no double-execution), "
         f"got {recovered1} + {recovered2} = {total_recovered}"
     )
 
-    # Wait for tasks to finish (may have been submitted twice on SQLite)
     for db_result in orphans:
         _wait_for_db_result(db_result)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_row_level_locking_allows_concurrent_task_operations(backend):
+    """While one task holds a row lock, other tasks can still be recovered.
+
+    Proves the lock is row-scoped, not database-scoped. A slow task
+    holds its row lock for the full execution. A second recover_tasks()
+    call should skip the locked row and recover other orphaned tasks.
+    """
+    # Task A: slow, will hold its row lock for 2 seconds
+    task_a = DBTaskResult.objects.create(
+        args_kwargs={"args": [2], "kwargs": {}},
+        priority=0,
+        task_path="tests.tasks.slow_task",
+        queue_name="default",
+        backend_name="default",
+        exception_class_path="",
+        traceback="",
+    )
+    # Task B: fast, should be recoverable while A is locked
+    task_b = DBTaskResult.objects.create(
+        args_kwargs={"args": [1, 2], "kwargs": {}},
+        priority=0,
+        task_path="tests.tasks.add_numbers",
+        queue_name="default",
+        backend_name="default",
+        exception_class_path="",
+        traceback="",
+    )
+
+    # First recovery picks up both tasks. Task A starts executing (holds lock).
+    recovered1 = backend.recover_tasks()
+    assert recovered1 == 2
+
+    # Wait for task A to be RUNNING (holding its row lock)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        task_a.refresh_from_db()
+        if task_a.status == TaskResultStatus.RUNNING:
+            break
+        time.sleep(0.05)
+    assert task_a.status == TaskResultStatus.RUNNING
+
+    # Task B should finish quickly
+    _wait_for_db_result(task_b, timeout=5)
+    task_b.refresh_from_db()
+    assert task_b.status == TaskResultStatus.SUCCESSFUL
+
+    # Second recovery while A is still running — should find 0 tasks.
+    # A is locked (skip_locked skips it), B is already SUCCESSFUL.
+    recovered2 = backend.recover_tasks()
+    assert recovered2 == 0, (
+        f"Expected 0 recoverable tasks while A is locked, got {recovered2}"
+    )
+
+    # Wait for A to finish
+    _wait_for_db_result(task_a, timeout=10)
+    task_a.refresh_from_db()
+    assert task_a.status == TaskResultStatus.SUCCESSFUL
 
 
 @pytest.mark.django_db(transaction=True)

@@ -24,11 +24,18 @@ def _execute_task(
     backend_name: str,
     worker_id: str,
 ):
-    """Execute a task function. Runs in the thread pool."""
+    """Execute a task function. Runs in the thread pool.
+
+    Holds a ``SELECT FOR UPDATE`` lock on the task row for the entire
+    duration of execution.  This prevents ``recover_tasks()`` (which
+    uses ``skip_locked=True``) from resubmitting a task that is still
+    running — even across processes.
+    """
     from .models import DBTaskResult
 
     close_old_connections()
 
+    # Claim immediately (autocommit) so the RUNNING status is visible
     db_result = DBTaskResult.objects.get(id=result_id)
     db_result.claim(worker_id)
 
@@ -38,14 +45,29 @@ def _execute_task(
 
     task_started.send(sender=backend_type, task_result=task_result)
 
-    if task.takes_context:
-        raw_return_value = task.call(
-            TaskContext(task_result=task_result), *args, **kwargs
-        )
-    else:
-        raw_return_value = task.call(*args, **kwargs)
+    # Hold a row lock for the entire execution + result write.
+    # recover_tasks() uses skip_locked=True, so it will skip this row.
+    with transaction.atomic():
+        db_result = DBTaskResult.objects.select_for_update().get(id=result_id)
 
-    return normalize_json(raw_return_value)
+        task_exc = None
+        try:
+            if task.takes_context:
+                raw_return_value = task.call(
+                    TaskContext(task_result=task_result), *args, **kwargs
+                )
+            else:
+                raw_return_value = task.call(*args, **kwargs)
+            return_value = normalize_json(raw_return_value)
+        except Exception as exc:
+            task_exc = exc
+
+        # Write result — if this fails, the exception propagates,
+        # the transaction rolls back, and _on_complete logs a warning.
+        if task_exc is not None:
+            db_result.set_failed(task_exc)
+        else:
+            db_result.set_successful(return_value)
 
 
 class LocalDBBackend(BaseTaskBackend):
@@ -63,8 +85,20 @@ class LocalDBBackend(BaseTaskBackend):
         self._worker_id = get_random_string(32)
         self._state = None
 
+    def _check_db_support(self):
+        from django.db import connection
+
+        if not connection.features.has_select_for_update_skip_locked:
+            raise RuntimeError(
+                f"LocalDBBackend requires a database that supports "
+                f"SELECT FOR UPDATE SKIP LOCKED (e.g. PostgreSQL, MySQL). "
+                f"The current database engine ({connection.vendor}) does not "
+                f"support row-level locking."
+            )
+
     def _get_state(self):
         if self._state is None:
+            self._check_db_support()
             self._state = get_executor_state(
                 name=self._name,
                 executor_class=self.executor_class,
@@ -118,30 +152,19 @@ class LocalDBBackend(BaseTaskBackend):
         try:
             close_old_connections()
 
-            task_exc = None
-            return_value = None
-            try:
-                return_value = future.result()
-            except Exception as exc:
-                task_exc = exc
-
-            db_result = DBTaskResult.objects.get(id=result_id)
-            try:
-                if task_exc is not None:
-                    db_result.set_failed(task_exc)
-                else:
-                    db_result.set_successful(return_value)
-            except Exception:
+            exc = future.exception()
+            if exc is not None:
                 logger.warning(
                     "Task %s completed but failed to write result to DB. "
                     "Task will be stuck in RUNNING until recovered on "
                     "next startup.",
                     result_id,
-                    exc_info=True,
+                    exc_info=(type(exc), exc, exc.__traceback__),
                 )
+                return
 
             try:
-                db_result.refresh_from_db()
+                db_result = DBTaskResult.objects.get(id=result_id)
                 task_finished.send(
                     sender=type(self), task_result=db_result.task_result
                 )
@@ -167,20 +190,12 @@ class LocalDBBackend(BaseTaskBackend):
 
         Uses ``select_for_update(skip_locked=True)`` so that concurrent
         recovery calls (e.g. multiple processes starting simultaneously)
-        each claim a disjoint set of tasks.  This requires a database
-        that supports row-level locking (PostgreSQL, MySQL).  On SQLite,
-        ``skip_locked`` is silently ignored and concurrent recovery may
-        double-execute tasks.
+        each claim a disjoint set of tasks.  Requires a database that
+        supports row-level locking (PostgreSQL, MySQL).
         """
         from .models import DBTaskResult
 
-        from django.db import connection
-
-        if not connection.features.has_select_for_update_skip_locked:
-            logger.warning(
-                "Database does not support select_for_update(skip_locked=True). "
-                "Concurrent recovery may double-execute tasks."
-            )
+        self._check_db_support()
 
         recovered = 0
         tasks_to_submit = []

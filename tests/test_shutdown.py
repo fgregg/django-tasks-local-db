@@ -78,31 +78,34 @@ def test_enqueue_after_close_does_not_orphan(backend):
 # --- Subprocess-based SIGTERM test ---
 
 
-def _make_worker_script(db_path):
-    """Generate a self-contained subprocess script that uses its own settings."""
-    return textwrap.dedent(f"""\
+def _make_worker_script():
+    """Generate a self-contained subprocess script that uses PostgreSQL."""
+    return textwrap.dedent("""\
         import os, sys, time, django
         from django.conf import settings
 
         settings.configure(
             SECRET_KEY="test-secret-key",
-            DATABASES={{
-                "default": {{
-                    "ENGINE": "django.db.backends.sqlite3",
-                    "NAME": {db_path!r},
-                    "OPTIONS": {{"transaction_mode": "IMMEDIATE"}},
-                }}
-            }},
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": os.environ.get("PGDATABASE", "django_tasks_test"),
+                    "USER": os.environ.get("PGUSER", "django_tasks"),
+                    "PASSWORD": os.environ.get("PGPASSWORD", "django_tasks"),
+                    "HOST": os.environ.get("PGHOST", "localhost"),
+                    "PORT": os.environ.get("PGPORT", "5433"),
+                }
+            },
             INSTALLED_APPS=[
                 "django.contrib.contenttypes",
                 "django_tasks_local_db",
             ],
-            TASKS={{
-                "default": {{
+            TASKS={
+                "default": {
                     "BACKEND": "django_tasks_local_db.LocalDBBackend",
-                    "OPTIONS": {{"MAX_WORKERS": 2}},
-                }}
-            }},
+                    "OPTIONS": {"MAX_WORKERS": 2},
+                }
+            },
             USE_TZ=True,
             DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
         )
@@ -114,7 +117,7 @@ def _make_worker_script(db_path):
 
         from tests.tasks import slow_task
         result = slow_task.enqueue(2.0)
-        print(f"TASK_ID={{result.id}}", flush=True)
+        print(f"TASK_ID={result.id}", flush=True)
 
         # Wait for the task to start running
         time.sleep(0.5)
@@ -129,58 +132,55 @@ def test_sigterm_kills_inflight_task():
     """SIGTERM: does an in-flight task complete or get orphaned?
 
     Starts a subprocess that enqueues a slow task, sends SIGTERM,
-    then checks the DB state.
+    then checks the DB state via psycopg.
     """
-    import tempfile
+    import psycopg
 
-    db_path = os.path.join(tempfile.mkdtemp(), "sigterm_test.sqlite3")
-    script = _make_worker_script(db_path)
+    script = _make_worker_script()
 
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, "-c", script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
-        task_id = None
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            line = proc.stdout.readline().strip()
-            if line.startswith("TASK_ID="):
-                task_id = line.split("=", 1)[1]
-            elif line == "READY":
-                break
+    task_id = None
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline().strip()
+        if line.startswith("TASK_ID="):
+            task_id = line.split("=", 1)[1]
+        elif line == "READY":
+            break
 
-        assert task_id is not None, (
-            f"Never got TASK_ID from subprocess.\nstderr: {proc.stderr.read()}"
-        )
+    assert task_id is not None, (
+        f"Never got TASK_ID from subprocess.\nstderr: {proc.stderr.read()}"
+    )
 
-        # Send SIGTERM
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=10)
+    # Send SIGTERM
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=10)
 
-        # Check DB state by connecting directly
-        import sqlite3
+    # Check DB state via psycopg
+    conn = psycopg.connect(
+        dbname=os.environ.get("PGDATABASE", "django_tasks_test"),
+        user=os.environ.get("PGUSER", "django_tasks"),
+        password=os.environ.get("PGPASSWORD", "django_tasks"),
+        host=os.environ.get("PGHOST", "localhost"),
+        port=os.environ.get("PGPORT", "5433"),
+    )
+    row = conn.execute(
+        "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = %s",
+        (task_id,),
+    ).fetchone()
+    conn.close()
 
-        conn = sqlite3.connect(db_path)
-        # Django stores UUIDs without hyphens in SQLite
-        task_id_nohyphens = task_id.replace("-", "")
-        row = conn.execute(
-            "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = ?",
-            (task_id_nohyphens,),
-        ).fetchone()
-        conn.close()
+    assert row is not None, f"Task {task_id} not found in DB"
+    status = row[0]
 
-        assert row is not None, f"Task {task_id} not found in DB"
-        status = row[0]
-
-        # After SIGTERM, the task should reach a terminal state
-        # (either finished successfully or marked as failed)
-        assert status in ("SUCCESSFUL", "FAILED"), (
-            f"Task stuck in {status} after SIGTERM — should reach a terminal state"
-        )
-    finally:
-        if os.path.exists(db_path):
-            os.unlink(db_path)
+    # After SIGTERM, the task should reach a terminal state
+    # (either finished successfully or marked as failed)
+    assert status in ("SUCCESSFUL", "FAILED"), (
+        f"Task stuck in {status} after SIGTERM — should reach a terminal state"
+    )

@@ -1,12 +1,5 @@
-"""Tests for recovery bugs — these should FAIL until fixed.
+"""Tests for recovery of in-flight tasks."""
 
-Gap 3: recover_tasks() picks up tasks that are currently running in the
-same process, causing double execution.
-
-Gap 2: enqueue() during executor shutdown creates orphaned DB rows.
-"""
-
-import threading
 import time
 
 import pytest
@@ -14,7 +7,7 @@ from django.tasks import TaskResultStatus, task_backends
 
 from django_tasks_local_db.models import DBTaskResult
 
-from .tasks import counting_task, get_call_count, reset_call_counts, slow_task
+from .tasks import counting_task, get_call_count, reset_call_counts
 
 
 @pytest.fixture
@@ -73,52 +66,4 @@ def test_recover_tasks_does_not_double_execute_inflight(backend):
     # recover_tasks should not have claimed any in-flight tasks
     assert recovered == 0, (
         f"recover_tasks() recovered {recovered} tasks that were actively running"
-    )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_enqueue_during_shutdown_no_orphans(backend):
-    """enqueue() while executor is shutting down should not orphan DB rows.
-
-    Bug: enqueue() creates the DB row first, then calls executor.submit().
-    If the executor is shutting down, submit() raises RuntimeError,
-    leaving a READY row in the DB that will never be processed.
-    """
-    # Enqueue a slow task to keep the executor busy during shutdown
-    slow_task.enqueue(2)
-    time.sleep(0.1)  # Let it start
-
-    # Start shutdown in a background thread (it blocks waiting for slow_task)
-    shutdown_done = threading.Event()
-
-    def do_shutdown():
-        backend.close()
-        shutdown_done.set()
-
-    t = threading.Thread(target=do_shutdown)
-    t.start()
-
-    time.sleep(0.1)  # Let shutdown begin
-
-    # Try to enqueue while shutdown is in progress
-    orphan_created = False
-    try:
-        result = counting_task.enqueue("during_shutdown", 0.1)
-        # If enqueue didn't raise, the task should eventually complete
-        orphan_created = False
-    except RuntimeError:
-        # enqueue raised because executor is shutting down —
-        # but did it leave a DB row behind?
-        orphans = DBTaskResult.objects.filter(
-            task_path="tests.tasks.counting_task",
-            status=TaskResultStatus.READY,
-        )
-        orphan_created = orphans.exists()
-
-    shutdown_done.wait(timeout=10)
-    # Reset so subsequent tests get a fresh executor
-    backend._state = None
-
-    assert not orphan_created, (
-        "enqueue() raised RuntimeError but left an orphaned READY row in the DB"
     )

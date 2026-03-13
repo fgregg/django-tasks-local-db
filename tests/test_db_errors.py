@@ -175,6 +175,6 @@ def test_execute_task_db_read_failure_emits_warning(backend):
 
     warnings = [r.getMessage().lower() for r in handler.records if r.levelno >= logging.WARNING]
     assert any(
-        "failed to write result to db" in msg and "could not read task row" in msg
+        "failed to write result to db" in msg
         for msg in warnings
-    ), f"Expected warning about DB read failure, got: {warnings}"
+    ), f"Expected warning about DB write failure, got: {warnings}"

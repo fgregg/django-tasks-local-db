@@ -1,35 +1,17 @@
 import os
-import tempfile
 
 SECRET_KEY = "test-secret-key-not-for-production"
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-if DATABASE_URL:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": "django_tasks_test",
-            "USER": "django_tasks",
-            "PASSWORD": "django_tasks",
-            "HOST": "localhost",
-            "PORT": "5433",
-        }
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("PGDATABASE", "django_tasks_test"),
+        "USER": os.environ.get("PGUSER", "django_tasks"),
+        "PASSWORD": os.environ.get("PGPASSWORD", "django_tasks"),
+        "HOST": os.environ.get("PGHOST", "localhost"),
+        "PORT": os.environ.get("PGPORT", "5433"),
     }
-else:
-    _TEST_DB_DIR = tempfile.mkdtemp(prefix="django_tasks_test_")
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": os.path.join(_TEST_DB_DIR, "test.sqlite3"),
-            "OPTIONS": {
-                "transaction_mode": "IMMEDIATE",
-            },
-            "TEST": {
-                "NAME": os.path.join(_TEST_DB_DIR, "test.sqlite3"),
-            },
-        }
-    }
+}
 
 INSTALLED_APPS = [
     "django.contrib.admin",
