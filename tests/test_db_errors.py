@@ -137,3 +137,44 @@ def test_stuck_task_recovered_on_restart(backend):
 
     assert db_result.status == TaskResultStatus.SUCCESSFUL
     assert db_result.return_value == 7
+
+
+@pytest.mark.django_db(transaction=True)
+def test_execute_task_db_read_failure_emits_warning(backend):
+    """If _execute_task can't read the DB row, _on_complete should warn.
+
+    _execute_task does objects.get(id=result_id). If this fails, the
+    exception propagates as the future's exception. _on_complete then
+    tries objects.get() again to call set_failed() — which also fails.
+    The warning should still be emitted.
+    """
+    from django.db import OperationalError
+
+    handler = ThreadSafeLogCapture()
+    logger = logging.getLogger("django_tasks_local_db")
+    logger.addHandler(handler)
+    try:
+        original_get = DBTaskResult.objects.get
+
+        call_count = 0
+
+        def failing_get(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Let the first get() in enqueue() succeed (creating the row),
+            # but fail in _execute_task and _on_complete
+            if call_count <= 1:
+                return original_get(*args, **kwargs)
+            raise OperationalError("DB gone")
+
+        with patch.object(type(DBTaskResult.objects), "get", failing_get):
+            add_numbers.enqueue(3, 4)
+            time.sleep(2)
+    finally:
+        logger.removeHandler(handler)
+
+    warnings = [r.getMessage().lower() for r in handler.records if r.levelno >= logging.WARNING]
+    assert any(
+        "failed to write result to db" in msg and "could not read task row" in msg
+        for msg in warnings
+    ), f"Expected warning about DB read failure, got: {warnings}"

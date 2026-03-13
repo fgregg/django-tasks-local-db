@@ -35,3 +35,31 @@ def always_fails():
 @task
 def multiply(a, b):
     return a * b
+
+
+# Thread-safe counter for detecting double execution
+import threading
+
+_call_counter_lock = threading.Lock()
+_call_counts: dict[str, int] = {}
+
+
+@task
+def counting_task(key, sleep_seconds=1):
+    """Sleeps then increments a counter. Used to detect double execution."""
+    import time
+
+    time.sleep(sleep_seconds)
+    with _call_counter_lock:
+        _call_counts[key] = _call_counts.get(key, 0) + 1
+    return _call_counts[key]
+
+
+def get_call_count(key):
+    with _call_counter_lock:
+        return _call_counts.get(key, 0)
+
+
+def reset_call_counts():
+    with _call_counter_lock:
+        _call_counts.clear()
