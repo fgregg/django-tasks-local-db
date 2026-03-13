@@ -17,6 +17,7 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-django",
+    "pytest-benchmark",
 ]
 postgres = [
     "psycopg[binary]",
@@ -25,3 +26,7 @@ postgres = [
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 pythonpath = ["."]
+markers = [
+    "benchmark: stress/performance tests (deselect with '-m not benchmark')",
+]
+addopts = "-m 'not benchmark'"

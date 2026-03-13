@@ -72,24 +72,24 @@ def test_mixed_failing_and_succeeding_concurrent(backend):
 def test_backpressure_when_pool_saturated(backend):
     """Tasks enqueued when all threads are busy should queue and complete.
 
-    Test settings use MAX_WORKERS=2. We fill both threads with slow tasks,
-    then enqueue a fast task. All three should eventually complete.
+    Enqueue more slow tasks than MAX_WORKERS to fill the pool, then
+    enqueue a fast task. All should eventually complete.
     """
-    slow1 = slow_task.enqueue(0.5)
-    slow2 = slow_task.enqueue(0.5)
+    n_slow = backend._max_workers + 2
+    slow_results = [slow_task.enqueue(1) for _ in range(n_slow)]
 
     # Give the slow tasks a moment to claim threads
     time.sleep(0.1)
 
-    # This should queue internally in the ThreadPoolExecutor
+    # This should queue until a worker frees up
     fast = add_numbers.enqueue(10, 20)
 
-    _wait_for_result(slow1, timeout=10)
-    _wait_for_result(slow2, timeout=10)
-    _wait_for_result(fast, timeout=10)
+    for r in slow_results:
+        _wait_for_result(r, timeout=30)
+    _wait_for_result(fast, timeout=30)
 
-    assert slow1.status == TaskResultStatus.SUCCESSFUL
-    assert slow2.status == TaskResultStatus.SUCCESSFUL
+    for r in slow_results:
+        assert r.status == TaskResultStatus.SUCCESSFUL
     assert fast.status == TaskResultStatus.SUCCESSFUL
     assert fast.return_value == 30
 

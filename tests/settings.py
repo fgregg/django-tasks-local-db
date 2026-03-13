@@ -46,7 +46,7 @@ TASKS = {
     "default": {
         "BACKEND": "django_tasks_local_db.LocalDBBackend",
         "OPTIONS": {
-            "MAX_WORKERS": 2,
+            "MAX_WORKERS": 25,
         },
     }
 }

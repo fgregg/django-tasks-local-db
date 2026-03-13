@@ -63,3 +63,18 @@ def get_call_count(key):
 def reset_call_counts():
     with _call_counter_lock:
         _call_counts.clear()
+
+
+@task
+def noop_task():
+    """Minimal task for benchmarking overhead."""
+    pass
+
+
+@task
+def cpu_task(n=1000):
+    """CPU-bound task for stress testing."""
+    total = 0
+    for i in range(n):
+        total += i * i
+    return total

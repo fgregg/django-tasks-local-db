@@ -8,3 +8,4 @@ build/
 *.egg
 .pytest_cache/
 db.sqlite3
+django_tasks_test_*/

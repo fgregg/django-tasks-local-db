@@ -1,6 +1,7 @@
 """Tests for watcher-loop recovery behavior."""
 
 import time
+from unittest.mock import patch
 
 import pytest
 from django.tasks import TaskResultStatus, task_backends
@@ -94,3 +95,69 @@ def test_watcher_recovers_stale_tasks(backend):
 
     assert db_result.status == TaskResultStatus.SUCCESSFUL
     assert db_result.return_value == 3
+
+
+@pytest.mark.django_db(transaction=True)
+def test_cross_process_watcher_no_double_dispatch(backend):
+    """Two processes' watchers should NOT double-dispatch the same READY task.
+
+    Because claim() runs inside the SELECT FOR UPDATE transaction, the task
+    transitions to RUNNING before the lock is released. A second watcher's
+    tick will not see the task as READY.
+    """
+    from django_tasks_local_db.backend import LocalDBBackend
+
+    db_result = DBTaskResult.objects.create(
+        args_kwargs={"args": ["race_test", 2], "kwargs": {}},
+        priority=0,
+        task_path="tests.tasks.counting_task",
+        queue_name="default",
+        backend_name="default",
+        exception_class_path="",
+        traceback="",
+    )
+
+    # Create a second backend instance simulating a second process
+    backend_b = LocalDBBackend("default", {
+        "BACKEND": "django_tasks_local_db.LocalDBBackend",
+        "OPTIONS": {"MAX_WORKERS": 25},
+    })
+
+    try:
+        # Process A's watcher picks up and claims the READY task
+        backend._watcher_tick()
+
+        # Task should now be RUNNING (claimed inside the transaction)
+        db_result.refresh_from_db()
+        assert db_result.status == TaskResultStatus.RUNNING, (
+            f"Expected RUNNING after first tick, got {db_result.status}"
+        )
+
+        # Process B's watcher should NOT pick it up — it's no longer READY
+        backend_b._watcher_tick()
+
+        # Wait for the task to finish
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            db_result.refresh_from_db()
+            if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+                break
+            time.sleep(0.05)
+
+        assert db_result.status == TaskResultStatus.SUCCESSFUL
+
+        # Wait a bit for any second execution to finish if it was dispatched
+        time.sleep(1)
+
+        # The task should have been called exactly once
+        count = get_call_count("race_test")
+        assert count == 1, (
+            f"Task was executed {count} times — cross-process race caused double dispatch"
+        )
+    finally:
+        # Only stop backend_b's watcher — don't shut down the shared executor
+        # (both backends share the same executor keyed by "tasks-default")
+        backend_b._watcher_stop.set()
+        if backend_b._watcher_thread is not None:
+            backend_b._watcher_thread.join(timeout=5)
+        backend_b._watcher_started = False

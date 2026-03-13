@@ -187,9 +187,9 @@ def test_execute_task_db_read_failure_emits_warning(backend):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_claim_retry_exhaustion_emits_warning(backend):
-    """When claim() fails after all retries, the exception propagates
-    and _on_complete logs a warning. The task is left in READY state.
+def test_claim_failure_logs_watcher_error(backend):
+    """When claim() fails in the watcher's atomic block, the watcher loop
+    catches the exception and logs an error. The task stays READY.
     """
     from django.db import OperationalError
 
@@ -205,11 +205,15 @@ def test_claim_retry_exhaustion_emits_warning(backend):
     finally:
         logger.removeHandler(handler)
 
-    warnings = [r.getMessage().lower() for r in handler.records if r.levelno >= logging.WARNING]
+    errors = [r.getMessage().lower() for r in handler.records if r.levelno >= logging.ERROR]
     assert any(
-        "failed to write result to db" in msg
-        for msg in warnings
-    ), f"Expected warning about claim failure, got: {warnings}"
+        "error in watcher loop" in msg
+        for msg in errors
+    ), f"Expected watcher error about claim failure, got: {errors}"
+
+    # Task should still be READY since claim failed inside the atomic block
+    db_result = DBTaskResult.objects.get(id=result.id)
+    assert db_result.status == TaskResultStatus.READY
 
 
 @pytest.mark.django_db(transaction=True)

@@ -6,7 +6,7 @@ from django_tasks_local_db.backend import LocalDBBackend
 
 @pytest.fixture(autouse=True)
 def _cleanup_backend():
-    """Stop the watcher and shut down the executor between tests.
+    """Shut down and restart the backend between tests.
 
     The watcher loop runs as a daemon thread and will pick up orphan rows
     from other tests if not stopped. This fixture ensures each test gets
@@ -18,3 +18,5 @@ def _cleanup_backend():
         backend = task_backends[alias]
         if isinstance(backend, LocalDBBackend):
             backend.close()
+            # Restart the watcher for the next test
+            backend._ensure_watcher()

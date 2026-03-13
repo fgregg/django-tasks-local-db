@@ -43,13 +43,16 @@ def test_close_waits_for_inflight_tasks(backend):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_enqueue_after_close_still_works(backend):
-    """After close(), enqueue should still work — it creates a fresh executor."""
+def test_enqueue_after_close_and_restart(backend):
+    """After close() + _ensure_watcher(), enqueue should still work."""
     # Ensure we have an active executor first, then shut it down
     backend._get_state()
     backend.close()
 
-    # enqueue() should succeed — it writes to DB and starts a new watcher
+    # Restart the watcher (in production this would happen on process restart)
+    backend._ensure_watcher()
+
+    # enqueue() should succeed — the restarted watcher picks up the task
     result = slow_task.enqueue(0.1)
 
     deadline = time.monotonic() + 10
