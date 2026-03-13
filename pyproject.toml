@@ -4,7 +4,7 @@ build-backend = "pdm.backend"
 
 [project]
 name = "django-tasks-local-db"
-version = "0.1.0"
+version = "0.2.0"
 description = "Django Tasks backend combining in-process thread pool execution with database persistence"
 readme = "README.md"
 license = "MIT"
