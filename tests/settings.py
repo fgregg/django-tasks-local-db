@@ -1,11 +1,19 @@
+import os
+import tempfile
+
 SECRET_KEY = "test-secret-key-not-for-production"
+
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="django_tasks_test_")
 
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": ":memory:",
+        "NAME": os.path.join(_TEST_DB_DIR, "test.sqlite3"),
         "OPTIONS": {
             "transaction_mode": "IMMEDIATE",
+        },
+        "TEST": {
+            "NAME": os.path.join(_TEST_DB_DIR, "test.sqlite3"),
         },
     }
 }

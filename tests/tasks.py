@@ -25,3 +25,13 @@ def slow_task(seconds=0.1):
 @task(takes_context=True)
 def get_task_id(context: TaskContext) -> str:
     return context.task_result.id
+
+
+@task
+def always_fails():
+    raise RuntimeError("always fails")
+
+
+@task
+def multiply(a, b):
+    return a * b
