@@ -182,6 +182,66 @@ def test_sigterm_kills_inflight_task():
     )
 
 
+def test_sigkill_leaves_task_for_recovery():
+    """SIGKILL: task is left RUNNING with a stale heartbeat.
+
+    Simulates OOM or hard kill. The task can't finish gracefully, so it
+    stays RUNNING. A new process's watcher should recover it via heartbeat
+    timeout. Here we just verify the task is stuck in RUNNING after kill.
+    """
+    import psycopg
+
+    script = _make_worker_script()
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    task_id = None
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline().strip()
+        if line.startswith("TASK_ID="):
+            task_id = line.split("=", 1)[1]
+        elif line == "READY":
+            break
+
+    assert task_id is not None, (
+        f"Never got TASK_ID from subprocess.\nstderr: {proc.stderr.read()}"
+    )
+
+    # SIGKILL — no graceful shutdown, threads die immediately
+    proc.send_signal(signal.SIGKILL)
+    proc.wait(timeout=10)
+
+    # Check DB state — task should be stuck in RUNNING (no chance to finish)
+    conn = psycopg.connect(
+        dbname=os.environ.get("PGDATABASE", "django_tasks_test"),
+        user=os.environ.get("PGUSER", "django_tasks"),
+        password=os.environ.get("PGPASSWORD", "django_tasks"),
+        host=os.environ.get("PGHOST", "localhost"),
+        port=os.environ.get("PGPORT", "5433"),
+    )
+    row = conn.execute(
+        "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = %s",
+        (task_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None, f"Task {task_id} not found in DB"
+    status = row[0]
+
+    # After SIGKILL, the task should be stuck in RUNNING — it had no
+    # chance to complete. A new process's watcher would recover it via
+    # heartbeat timeout.
+    assert status == "RUNNING", (
+        f"Expected RUNNING after SIGKILL, got {status}"
+    )
+
+
 def _make_enqueue_during_sigterm_script():
     """Script that enqueues a task during SIGTERM grace period."""
     return textwrap.dedent("""\
