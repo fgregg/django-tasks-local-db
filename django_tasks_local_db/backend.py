@@ -76,7 +76,7 @@ class LocalDBBackend(BaseTaskBackend):
     supports_defer = True
     supports_async_task = False
     supports_get_result = True
-    supports_priority = False
+    supports_priority = True
     executor_class = ThreadPoolExecutor
 
     def __init__(self, alias: str, params: dict[str, Any]) -> None:
