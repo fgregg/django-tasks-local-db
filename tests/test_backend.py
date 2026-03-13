@@ -163,3 +163,54 @@ def test_takes_context(backend):
 
     assert result.status == TaskResultStatus.SUCCESSFUL
     assert result.return_value == result.id
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timestamps_set_correctly(backend):
+    """enqueued_at, started_at, finished_at should be set and in order."""
+    result = add_numbers.enqueue(1, 2)
+    _wait_for_result(result)
+
+    db_row = DBTaskResult.objects.get(id=result.id)
+    assert db_row.enqueued_at is not None
+    assert db_row.started_at is not None
+    assert db_row.finished_at is not None
+    assert db_row.enqueued_at <= db_row.started_at <= db_row.finished_at
+
+
+@pytest.mark.django_db(transaction=True)
+def test_failed_task_has_errors_on_task_result(backend):
+    """TaskResult.errors should contain a TaskError with exception details."""
+    result = failing_task.enqueue()
+    _wait_for_result(result)
+
+    fetched = failing_task.get_result(result.id)
+    assert fetched.status == TaskResultStatus.FAILED
+    assert len(fetched.errors) == 1
+
+    error = fetched.errors[0]
+    assert error.exception_class_path == "builtins.ValueError"
+    assert "intentional failure" in error.traceback
+
+
+@pytest.mark.django_db(transaction=True)
+def test_successful_task_has_no_errors(backend):
+    """TaskResult.errors should be empty for successful tasks."""
+    result = add_numbers.enqueue(1, 2)
+    _wait_for_result(result)
+
+    fetched = add_numbers.get_result(result.id)
+    assert fetched.errors == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_get_result_reflects_completed_state(backend):
+    """get_result called after completion should return final status and value."""
+    result = add_numbers.enqueue(5, 5)
+    _wait_for_result(result)
+
+    fetched = add_numbers.get_result(result.id)
+    assert fetched.status == TaskResultStatus.SUCCESSFUL
+    assert fetched.return_value == 10
+    assert fetched.started_at is not None
+    assert fetched.finished_at is not None
