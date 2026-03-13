@@ -126,18 +126,31 @@ class LocalDBBackend(BaseTaskBackend):
                 task_exc = exc
 
             db_result = DBTaskResult.objects.get(id=result_id)
-            if task_exc is not None:
-                db_result.set_failed(task_exc)
-            else:
-                db_result.set_successful(return_value)
+            try:
+                if task_exc is not None:
+                    db_result.set_failed(task_exc)
+                else:
+                    db_result.set_successful(return_value)
+            except Exception:
+                logger.warning(
+                    "Task %s completed but failed to write result to DB. "
+                    "Task will be stuck in RUNNING until recovered on "
+                    "next startup.",
+                    result_id,
+                    exc_info=True,
+                )
 
-            task_finished.send(
-                sender=type(self), task_result=db_result.task_result
-            )
+            try:
+                db_result.refresh_from_db()
+                task_finished.send(
+                    sender=type(self), task_result=db_result.task_result
+                )
+            except Exception:
+                pass
         finally:
-            state = self._get_state()
-            with state.lock:
-                state.futures.pop(result_id, None)
+            if self._state is not None:
+                with self._state.lock:
+                    self._state.futures.pop(result_id, None)
 
     def get_result(self, result_id: str):
         from .models import DBTaskResult
@@ -151,17 +164,32 @@ class LocalDBBackend(BaseTaskBackend):
         """Recover orphaned tasks from DB and resubmit to the executor.
 
         Returns the number of tasks recovered.
+
+        Uses ``select_for_update(skip_locked=True)`` so that concurrent
+        recovery calls (e.g. multiple processes starting simultaneously)
+        each claim a disjoint set of tasks.  This requires a database
+        that supports row-level locking (PostgreSQL, MySQL).  On SQLite,
+        ``skip_locked`` is silently ignored and concurrent recovery may
+        double-execute tasks.
         """
         from .models import DBTaskResult
+
+        from django.db import connection
+
+        if not connection.features.has_select_for_update_skip_locked:
+            logger.warning(
+                "Database does not support select_for_update(skip_locked=True). "
+                "Concurrent recovery may double-execute tasks."
+            )
 
         recovered = 0
         tasks_to_submit = []
         with transaction.atomic():
             orphaned = (
                 DBTaskResult.objects.filter(
-                    status__in=[TaskResultStatus.READY, TaskResultStatus.RUNNING]
+                    status__in=[TaskResultStatus.READY, TaskResultStatus.RUNNING],
+                    backend_name=self.alias,
                 )
-                .filter(backend_name=self.alias)
                 .select_for_update(skip_locked=True)
             )
             for db_result in orphaned:
@@ -174,7 +202,11 @@ class LocalDBBackend(BaseTaskBackend):
                     db_result.args_kwargs["kwargs"],
                 ))
                 recovered += 1
-                logger.info("Recovered orphaned task %s (%s)", result_id, db_result.task_path)
+                logger.info(
+                    "Recovered orphaned task %s (%s)",
+                    result_id,
+                    db_result.task_path,
+                )
 
         for result_id, task_path, args, kwargs in tasks_to_submit:
             state = self._get_state()
@@ -197,3 +229,4 @@ class LocalDBBackend(BaseTaskBackend):
 
     def close(self):
         shutdown_executor(self._name)
+        self._state = None

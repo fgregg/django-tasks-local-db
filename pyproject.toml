@@ -18,6 +18,9 @@ dev = [
     "pytest",
     "pytest-django",
 ]
+postgres = [
+    "psycopg[binary]",
+]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"

@@ -1,8 +1,21 @@
 import logging
+import signal
+import sys
 
 from django.apps import AppConfig
 
 logger = logging.getLogger("django_tasks_local_db")
+
+
+def _sigterm_handler(signum, frame):
+    """Gracefully shut down all task executors on SIGTERM."""
+    from .state import _executor_states, _registry_lock
+
+    with _registry_lock:
+        for name, state in list(_executor_states.items()):
+            state.executor.shutdown(wait=True)
+
+    sys.exit(0)
 
 
 class DjangoTasksLocalDbConfig(AppConfig):
@@ -12,6 +25,10 @@ class DjangoTasksLocalDbConfig(AppConfig):
 
     def ready(self):
         import threading
+
+        # Register SIGTERM handler for graceful shutdown (e.g. Cloud Run)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, _sigterm_handler)
 
         # Defer recovery until after Django is fully initialized.
         # This avoids "database accessed during app initialization" warnings

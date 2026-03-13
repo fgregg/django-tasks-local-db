@@ -1,0 +1,11 @@
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: django_tasks_test
+      POSTGRES_USER: django_tasks
+      POSTGRES_PASSWORD: django_tasks
+    tmpfs:
+      - /var/lib/postgresql/data
