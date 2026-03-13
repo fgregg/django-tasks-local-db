@@ -23,56 +23,44 @@ def backend():
 @pytest.mark.django_db(transaction=True)
 def test_close_waits_for_inflight_tasks(backend):
     """close() should wait for in-flight tasks to finish."""
-    result = slow_task.enqueue(0.5)
+    result = slow_task.enqueue(2)
 
-    # Give the task a moment to start
-    time.sleep(0.1)
+    # Wait for the watcher to dispatch the task and it to start running
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        db_result = DBTaskResult.objects.get(id=result.id)
+        if db_result.status == TaskResultStatus.RUNNING:
+            break
+        time.sleep(0.05)
+    assert db_result.status == TaskResultStatus.RUNNING
 
     # close() calls shutdown(wait=True) — should block until task finishes
     backend.close()
-    # Reset so subsequent tests get a fresh executor
-    backend._state = None
 
-    db_result = DBTaskResult.objects.get(id=result.id)
+    db_result.refresh_from_db()
     assert db_result.status == TaskResultStatus.SUCCESSFUL
     assert db_result.return_value == "done"
 
 
 @pytest.mark.django_db(transaction=True)
-def test_enqueue_after_close_does_not_orphan(backend):
-    """After close(), enqueue should either raise or still work — not orphan a row."""
-    # Ensure we have an active executor first
+def test_enqueue_after_close_still_works(backend):
+    """After close(), enqueue should still work — it creates a fresh executor."""
+    # Ensure we have an active executor first, then shut it down
     backend._get_state()
     backend.close()
 
-    try:
-        result = slow_task.enqueue(0.1)
-        enqueue_raised = False
-        result_id = result.id
-    except RuntimeError:
-        enqueue_raised = True
-        result_id = None
-    finally:
-        # Reset so subsequent tests get a fresh executor
-        backend._state = None
+    # enqueue() should succeed — it writes to DB and starts a new watcher
+    result = slow_task.enqueue(0.1)
 
-    if enqueue_raised:
-        # If enqueue raised, there should be no orphaned READY rows
-        orphans = DBTaskResult.objects.filter(status=TaskResultStatus.READY)
-        assert not orphans.exists(), (
-            f"enqueue raised RuntimeError but left orphaned DB row: {orphans.first().id}"
-        )
-    else:
-        # If enqueue didn't raise, the task should actually complete
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            result.refresh()
-            if result.is_finished:
-                break
-            time.sleep(0.05)
-        assert result.is_finished, (
-            f"enqueue succeeded but task {result_id} never finished"
-        )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result.refresh()
+        if result.is_finished:
+            break
+        time.sleep(0.05)
+    assert result.is_finished, (
+        f"enqueue succeeded but task {result.id} never finished"
+    )
 
 
 # --- Subprocess-based SIGTERM test ---
@@ -116,11 +104,16 @@ def _make_worker_script():
         call_command("migrate", "--run-syncdb", verbosity=0)
 
         from tests.tasks import slow_task
-        result = slow_task.enqueue(2.0)
+        from django_tasks_local_db.models import DBTaskResult
+        result = slow_task.enqueue(5.0)
         print(f"TASK_ID={result.id}", flush=True)
 
-        # Wait for the task to start running
-        time.sleep(0.5)
+        # Wait for the task to actually start running
+        for _ in range(100):
+            db_result = DBTaskResult.objects.get(id=result.id)
+            if db_result.status == "RUNNING":
+                break
+            time.sleep(0.1)
         print("READY", flush=True)
 
         # Wait to be killed

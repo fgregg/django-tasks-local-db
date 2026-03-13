@@ -14,7 +14,7 @@ def backend():
     return task_backends["default"]
 
 
-def _wait_for_result(result, timeout=5):
+def _wait_for_result(result, timeout=10):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result.refresh()
@@ -22,6 +22,16 @@ def _wait_for_result(result, timeout=5):
             return
         time.sleep(0.05)
     raise TimeoutError(f"Task {result.id} did not finish within {timeout}s")
+
+
+def _wait_for_db_result(db_result, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        db_result.refresh_from_db()
+        if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"DB task {db_result.id} did not finish within {timeout}s")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -79,8 +89,8 @@ def test_get_result_not_found(backend):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_recover_orphaned_tasks(backend):
-    """Create orphaned DB rows and verify recovery picks them up."""
+def test_watcher_picks_up_orphaned_ready_tasks(backend):
+    """Orphaned READY rows in DB should be picked up by the watcher."""
     db_result = DBTaskResult.objects.create(
         args_kwargs={"args": [7, 8], "kwargs": {}},
         priority=0,
@@ -91,23 +101,17 @@ def test_recover_orphaned_tasks(backend):
         traceback="",
     )
 
-    recovered = backend.recover_tasks()
-    assert recovered == 1
-
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        db_result.refresh_from_db()
-        if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
-            break
-        time.sleep(0.05)
+    # Start the watcher — it will find and dispatch the orphaned task
+    backend._ensure_watcher()
+    _wait_for_db_result(db_result)
 
     assert db_result.status == TaskResultStatus.SUCCESSFUL
     assert db_result.return_value == 15
 
 
 @pytest.mark.django_db(transaction=True)
-def test_get_result_after_recover(backend):
-    """Regression test for #1: get_result must work on recovered tasks."""
+def test_get_result_after_watcher_recovery(backend):
+    """Regression test for #1: get_result must work on watcher-recovered tasks."""
     db_result = DBTaskResult.objects.create(
         args_kwargs={"args": [50, 50], "kwargs": {}},
         priority=0,
@@ -118,15 +122,8 @@ def test_get_result_after_recover(backend):
         traceback="",
     )
 
-    recovered = backend.recover_tasks()
-    assert recovered == 1
-
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        db_result.refresh_from_db()
-        if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
-            break
-        time.sleep(0.05)
+    backend._ensure_watcher()
+    _wait_for_db_result(db_result)
 
     result = add_numbers.get_result(str(db_result.id))
     assert result.status == TaskResultStatus.SUCCESSFUL
@@ -134,10 +131,11 @@ def test_get_result_after_recover(backend):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_recover_running_tasks(backend):
-    """Tasks left in RUNNING state should also be recovered."""
+def test_watcher_recovers_stale_running_tasks(backend):
+    """Tasks stuck in RUNNING with stale heartbeats should be recovered."""
     from django.utils import timezone
 
+    stale_time = timezone.now() - timezone.timedelta(seconds=60)
     db_result = DBTaskResult.objects.create(
         args_kwargs={"args": [1, 2], "kwargs": {}},
         priority=0,
@@ -147,18 +145,12 @@ def test_recover_running_tasks(backend):
         exception_class_path="",
         traceback="",
         status=TaskResultStatus.RUNNING,
-        started_at=timezone.now(),
+        started_at=stale_time,
+        last_heartbeat_at=stale_time,
     )
 
-    recovered = backend.recover_tasks()
-    assert recovered == 1
-
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        db_result.refresh_from_db()
-        if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
-            break
-        time.sleep(0.05)
+    backend._ensure_watcher()
+    _wait_for_db_result(db_result)
 
     assert db_result.status == TaskResultStatus.SUCCESSFUL
     assert db_result.return_value == 3

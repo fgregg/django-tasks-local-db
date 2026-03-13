@@ -123,9 +123,15 @@ def test_stuck_task_recovered_on_restart(backend):
     db_result = DBTaskResult.objects.get(id=result.id)
     assert db_result.status == TaskResultStatus.RUNNING
 
-    # Simulate restart: recover_tasks finds it and re-executes
-    recovered = backend.recover_tasks()
-    assert recovered == 1
+    # Simulate restart: watcher's stale-task recovery finds it and re-executes.
+    # Set heartbeat to the past so stale() picks it up immediately.
+    from django.utils import timezone
+
+    stale_time = timezone.now() - timezone.timedelta(seconds=60)
+    DBTaskResult.objects.filter(id=result.id).update(last_heartbeat_at=stale_time)
+
+    # Trigger a watcher tick to recover the stale task
+    backend._watcher_tick()
 
     # Wait for recovery to complete
     deadline = time.monotonic() + 5

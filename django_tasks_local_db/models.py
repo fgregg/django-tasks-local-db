@@ -37,12 +37,22 @@ class DBTaskResultQuerySet(models.QuerySet):
     def ready(self):
         return self.filter(status=TaskResultStatus.READY)
 
+    def due(self):
+        """READY tasks whose run_after has arrived (or was never set)."""
+        now = timezone.now()
+        return self.filter(
+            status=TaskResultStatus.READY,
+        ).filter(Q(run_after__isnull=True) | Q(run_after__lte=now))
+
     def running(self):
         return self.filter(status=TaskResultStatus.RUNNING)
 
-    def orphaned(self):
-        """Tasks that are READY or RUNNING — candidates for recovery."""
-        return self.filter(status__in=[TaskResultStatus.READY, TaskResultStatus.RUNNING])
+    def stale(self, timeout):
+        """RUNNING tasks whose heartbeat is older than timeout seconds."""
+        cutoff = timezone.now() - timezone.timedelta(seconds=timeout)
+        return self.filter(
+            status=TaskResultStatus.RUNNING,
+        ).filter(Q(last_heartbeat_at__isnull=True) | Q(last_heartbeat_at__lt=cutoff))
 
     def successful(self):
         return self.filter(status=TaskResultStatus.SUCCESSFUL)
@@ -86,6 +96,8 @@ class DBTaskResult(models.Model):
         default="", verbose_name=_("exception class path")
     )
     traceback = models.TextField(default="", verbose_name=_("traceback"))
+    run_after = models.DateTimeField(null=True, verbose_name=_("run after"))
+    last_heartbeat_at = models.DateTimeField(null=True, verbose_name=_("last heartbeat at"))
 
     objects = DBTaskResultQuerySet.as_manager()
 
@@ -128,11 +140,14 @@ class DBTaskResult(models.Model):
             raise SuspiciousOperation(
                 f"Task {self.id} does not point to a Task ({self.task_path})"
             )
-        return task_obj.using(
+        kwargs = dict(
             priority=self.priority,
             queue_name=self.queue_name,
             backend=self.backend_name,
         )
+        if self.run_after is not None:
+            kwargs["run_after"] = self.run_after
+        return task_obj.using(**kwargs)
 
     @property
     def task_result(self) -> TaskResult:
@@ -164,8 +179,9 @@ class DBTaskResult(models.Model):
     def claim(self, worker_id: str) -> None:
         self.status = TaskResultStatus.RUNNING
         self.started_at = timezone.now()
+        self.last_heartbeat_at = timezone.now()
         self.worker_ids = [*self.worker_ids, worker_id]
-        self.save(update_fields=["status", "started_at", "worker_ids"])
+        self.save(update_fields=["status", "started_at", "last_heartbeat_at", "worker_ids"])
 
     @retry()
     def set_successful(self, return_value) -> None:

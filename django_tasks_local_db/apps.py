@@ -30,13 +30,12 @@ class DjangoTasksLocalDbConfig(AppConfig):
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, _sigterm_handler)
 
-        # Defer recovery until after Django is fully initialized.
-        # This avoids "database accessed during app initialization" warnings
-        # and ensures the task backends are fully configured.
-        thread = threading.Thread(target=self._recover_orphaned_tasks, daemon=True)
+        # Start watcher loops for all LocalDBBackend instances.
+        # This ensures recovery of orphaned tasks from previous processes.
+        thread = threading.Thread(target=self._start_watchers, daemon=True)
         thread.start()
 
-    def _recover_orphaned_tasks(self):
+    def _start_watchers(self):
         import time
 
         from django.conf import settings
@@ -56,14 +55,8 @@ class DjangoTasksLocalDbConfig(AppConfig):
 
                 backend = task_backends[alias]
                 if isinstance(backend, LocalDBBackend):
-                    recovered = backend.recover_tasks()
-                    if recovered:
-                        logger.info(
-                            "Recovered %d orphaned task(s) for backend '%s'",
-                            recovered,
-                            alias,
-                        )
+                    backend._ensure_watcher()
             except Exception:
                 logger.exception(
-                    "Failed to recover tasks for backend '%s'", alias
+                    "Failed to start watcher for backend '%s'", alias
                 )

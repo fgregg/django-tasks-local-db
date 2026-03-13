@@ -1,9 +1,10 @@
-"""Tests for recovery of in-flight tasks."""
+"""Tests for watcher-loop recovery behavior."""
 
 import time
 
 import pytest
 from django.tasks import TaskResultStatus, task_backends
+from django.utils import timezone
 
 from django_tasks_local_db.models import DBTaskResult
 
@@ -23,16 +24,14 @@ def _reset_counters():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_recover_tasks_does_not_double_execute_inflight(backend):
-    """recover_tasks() should not re-submit tasks that are currently running.
+def test_watcher_does_not_double_dispatch_running_tasks(backend):
+    """The watcher loop should not re-dispatch tasks with fresh heartbeats.
 
-    Bug: recover_tasks() queries for status IN (READY, RUNNING) and
-    resubmits them all. But a RUNNING task may be actively executing
-    in the current process's thread pool — not orphaned. Re-submitting
-    it causes the task function to execute twice.
+    The watcher dispatches READY tasks via due() and recovers stale RUNNING
+    tasks. A RUNNING task with a recent heartbeat should NOT be re-dispatched.
     """
-    # Enqueue a slow task — it will be RUNNING in the thread pool
-    result = counting_task.enqueue("inflight_test", 2)
+    # Enqueue a slow task — the watcher will dispatch it
+    result = counting_task.enqueue("watcher_test", 2)
 
     # Wait for it to start running
     deadline = time.monotonic() + 5
@@ -43,11 +42,11 @@ def test_recover_tasks_does_not_double_execute_inflight(backend):
         time.sleep(0.05)
     assert db_result.status == TaskResultStatus.RUNNING
 
-    # Now call recover_tasks() while the task is still running.
-    # This SHOULD recover 0 tasks (nothing is orphaned).
-    recovered = backend.recover_tasks()
+    # Manually trigger a watcher tick — it should not re-dispatch the task
+    # because the heartbeat is fresh (within HEARTBEAT_TIMEOUT)
+    backend._watcher_tick()
 
-    # Wait for everything to finish
+    # Wait for the task to finish
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         db_result.refresh_from_db()
@@ -58,12 +57,40 @@ def test_recover_tasks_does_not_double_execute_inflight(backend):
     assert db_result.status == TaskResultStatus.SUCCESSFUL
 
     # The task should have been called exactly once
-    count = get_call_count("inflight_test")
+    count = get_call_count("watcher_test")
     assert count == 1, (
-        f"Task was executed {count} times — recover_tasks() caused double execution"
+        f"Task was executed {count} times — watcher double-dispatched"
     )
 
-    # recover_tasks should not have claimed any in-flight tasks
-    assert recovered == 0, (
-        f"recover_tasks() recovered {recovered} tasks that were actively running"
+
+@pytest.mark.django_db(transaction=True)
+def test_watcher_recovers_stale_tasks(backend):
+    """The watcher should recover tasks with stale heartbeats."""
+    # Create a RUNNING task with an old heartbeat (simulating a dead worker)
+    stale_time = timezone.now() - timezone.timedelta(seconds=60)
+    db_result = DBTaskResult.objects.create(
+        args_kwargs={"args": [1, 2], "kwargs": {}},
+        priority=0,
+        task_path="tests.tasks.add_numbers",
+        queue_name="default",
+        backend_name="default",
+        exception_class_path="",
+        traceback="",
+        status=TaskResultStatus.RUNNING,
+        started_at=stale_time,
+        last_heartbeat_at=stale_time,
     )
+
+    # Trigger a watcher tick — should recover the stale task
+    backend._watcher_tick()
+
+    # Wait for recovery
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        db_result.refresh_from_db()
+        if db_result.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+            break
+        time.sleep(0.05)
+
+    assert db_result.status == TaskResultStatus.SUCCESSFUL
+    assert db_result.return_value == 3
