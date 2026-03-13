@@ -92,3 +92,23 @@ def test_backpressure_when_pool_saturated(backend):
     assert slow2.status == TaskResultStatus.SUCCESSFUL
     assert fast.status == TaskResultStatus.SUCCESSFUL
     assert fast.return_value == 30
+
+
+@pytest.mark.django_db(transaction=True)
+def test_poison_pill_does_not_block_other_tasks(backend):
+    """A task that always fails should not block other tasks from completing.
+
+    Enqueue several always-failing tasks alongside a good task.
+    The good task should still complete successfully.
+    """
+    poison_results = [always_fails.enqueue() for _ in range(5)]
+    good_result = add_numbers.enqueue(42, 58)
+
+    _wait_for_result(good_result, timeout=10)
+    assert good_result.status == TaskResultStatus.SUCCESSFUL
+    assert good_result.return_value == 100
+
+    # All poison pills should have failed, not hung
+    for r in poison_results:
+        _wait_for_result(r, timeout=10)
+        assert r.status == TaskResultStatus.FAILED

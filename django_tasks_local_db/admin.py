@@ -13,10 +13,12 @@ class DBTaskResultAdmin(admin.ModelAdmin):
         "enqueued_at",
         "started_at",
         "finished_at",
+        "run_after",
+        "last_heartbeat_at",
         "priority",
         "queue_name",
     ]
-    list_filter = ["status", "priority", "queue_name"]
+    list_filter = ["status", "priority", "queue_name", "backend_name"]
     readonly_fields = [
         "id",
         "task_name",
@@ -25,6 +27,8 @@ class DBTaskResultAdmin(admin.ModelAdmin):
         "enqueued_at",
         "started_at",
         "finished_at",
+        "run_after",
+        "last_heartbeat_at",
         "priority",
         "queue_name",
         "backend_name",

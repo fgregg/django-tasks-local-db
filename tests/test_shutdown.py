@@ -177,3 +177,126 @@ def test_sigterm_kills_inflight_task():
     assert status in ("SUCCESSFUL", "FAILED"), (
         f"Task stuck in {status} after SIGTERM — should reach a terminal state"
     )
+
+
+def _make_enqueue_during_sigterm_script():
+    """Script that enqueues a task during SIGTERM grace period."""
+    return textwrap.dedent("""\
+        import os, sys, signal, time, django
+        from django.conf import settings
+
+        settings.configure(
+            SECRET_KEY="test-secret-key",
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": os.environ.get("PGDATABASE", "django_tasks_test"),
+                    "USER": os.environ.get("PGUSER", "django_tasks"),
+                    "PASSWORD": os.environ.get("PGPASSWORD", "django_tasks"),
+                    "HOST": os.environ.get("PGHOST", "localhost"),
+                    "PORT": os.environ.get("PGPORT", "5433"),
+                }
+            },
+            INSTALLED_APPS=[
+                "django.contrib.contenttypes",
+                "django_tasks_local_db",
+            ],
+            TASKS={
+                "default": {
+                    "BACKEND": "django_tasks_local_db.LocalDBBackend",
+                    "OPTIONS": {"MAX_WORKERS": 2},
+                }
+            },
+            USE_TZ=True,
+            DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
+        )
+        django.setup()
+
+        from django.core.management import call_command
+        call_command("migrate", "--run-syncdb", verbosity=0)
+
+        from tests.tasks import add_numbers
+
+        # Override SIGTERM: enqueue a task during the grace period, then exit
+        def sigterm_handler(signum, frame):
+            result = add_numbers.enqueue(10, 20)
+            print(f"LATE_TASK_ID={result.id}", flush=True)
+            # Give the watcher a moment to dispatch
+            time.sleep(3)
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, sigterm_handler)
+
+        print("READY", flush=True)
+        time.sleep(30)
+    """)
+
+
+def test_enqueue_during_sigterm_grace_period():
+    """A task enqueued during SIGTERM handling should not be lost.
+
+    The task is written to DB during the SIGTERM handler. Even if the
+    process exits before it completes, it should be in the DB (READY
+    or a terminal state) — not lost.
+    """
+    import psycopg
+
+    script = _make_enqueue_during_sigterm_script()
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    deadline = time.monotonic() + 15
+    ready = False
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline().strip()
+        if line == "READY":
+            ready = True
+            break
+
+    assert ready, f"Never got READY.\nstderr: {proc.stderr.read()}"
+
+    # Send SIGTERM — the handler will enqueue a task
+    proc.send_signal(signal.SIGTERM)
+
+    # Read the late task ID
+    task_id = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline().strip()
+        if line.startswith("LATE_TASK_ID="):
+            task_id = line.split("=", 1)[1]
+            break
+
+    proc.wait(timeout=10)
+
+    assert task_id is not None, (
+        f"Never got LATE_TASK_ID.\nstderr: {proc.stderr.read()}"
+    )
+
+    # Check DB — the task should exist (READY, SUCCESSFUL, or FAILED — not missing)
+    conn = psycopg.connect(
+        dbname=os.environ.get("PGDATABASE", "django_tasks_test"),
+        user=os.environ.get("PGUSER", "django_tasks"),
+        password=os.environ.get("PGPASSWORD", "django_tasks"),
+        host=os.environ.get("PGHOST", "localhost"),
+        port=os.environ.get("PGPORT", "5433"),
+    )
+    row = conn.execute(
+        "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = %s",
+        (task_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None, (
+        f"Task {task_id} enqueued during SIGTERM was lost — not found in DB"
+    )
+    # The task was enqueued and the process waited 3s, so it may have completed
+    status = row[0]
+    assert status in ("READY", "SUCCESSFUL", "FAILED"), (
+        f"Unexpected status {status} for task enqueued during SIGTERM"
+    )

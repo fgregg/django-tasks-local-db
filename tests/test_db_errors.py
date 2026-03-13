@@ -184,3 +184,48 @@ def test_execute_task_db_read_failure_emits_warning(backend):
         "failed to write result to db" in msg
         for msg in warnings
     ), f"Expected warning about DB write failure, got: {warnings}"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claim_retry_exhaustion_emits_warning(backend):
+    """When claim() fails after all retries, the exception propagates
+    and _on_complete logs a warning. The task is left in READY state.
+    """
+    from django.db import OperationalError
+
+    handler = ThreadSafeLogCapture()
+    logger = logging.getLogger("django_tasks_local_db")
+    logger.addHandler(handler)
+    try:
+        with patch.object(
+            DBTaskResult, "claim", side_effect=OperationalError("DB gone")
+        ):
+            result = add_numbers.enqueue(1, 2)
+            time.sleep(3)
+    finally:
+        logger.removeHandler(handler)
+
+    warnings = [r.getMessage().lower() for r in handler.records if r.levelno >= logging.WARNING]
+    assert any(
+        "failed to write result to db" in msg
+        for msg in warnings
+    ), f"Expected warning about claim failure, got: {warnings}"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_set_successful_retry_exhaustion_leaves_task_running(backend):
+    """When set_successful() fails after all retries, the task stays RUNNING
+    and can be recovered later by the watcher's stale-task detection.
+    """
+    from django.db import OperationalError
+
+    with patch.object(
+        DBTaskResult, "set_successful", side_effect=OperationalError("DB gone")
+    ):
+        result = add_numbers.enqueue(5, 6)
+        time.sleep(3)
+
+    db_result = DBTaskResult.objects.get(id=result.id)
+    assert db_result.status == TaskResultStatus.RUNNING, (
+        f"Expected RUNNING after retry exhaustion, got {db_result.status}"
+    )
