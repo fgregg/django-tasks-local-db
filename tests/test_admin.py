@@ -189,6 +189,14 @@ class TestAdminViews:
         assert "add_numbers" in content
 
     @pytest.mark.django_db(transaction=True)
+    def test_requeue_action_listed_for_superuser(self, admin_client, backend):
+        result = add_numbers.enqueue(1, 2)
+        _wait_for_result(result)
+        response = admin_client.get("/admin/django_tasks_local_db/dbtaskresult/")
+        assert response.status_code == 200
+        assert 'value="requeue"' in response.content.decode()
+
+    @pytest.mark.django_db(transaction=True)
     def test_detail_view_shows_run_after_and_heartbeat(self, admin_client, backend):
         """The detail view should display run_after and last_heartbeat_at fields."""
         future_time = timezone.now() + timezone.timedelta(hours=1)
@@ -209,3 +217,123 @@ class TestAdminViews:
         assert response.status_code == 200
         content = response.content.decode()
         assert "run_after" in content.lower() or "Run after" in content
+
+
+class TestRequeueAction:
+    """Tests for the 'Re-enqueue as a new task' admin action."""
+
+    CHANGELIST_URL = "/admin/django_tasks_local_db/dbtaskresult/"
+
+    @pytest.fixture
+    def admin_client(self):
+        user = User.objects.create_superuser("admin", "admin@test.com", "password")
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def _post_requeue(self, client, db_ids):
+        return client.post(
+            self.CHANGELIST_URL,
+            {"action": "requeue", "_selected_action": [str(i) for i in db_ids]},
+            follow=True,
+        )
+
+    @staticmethod
+    def _make_failed_row(task_path="tests.tasks.add_numbers", args=None):
+        return DBTaskResult.objects.create(
+            args_kwargs={"args": args if args is not None else [1, 2], "kwargs": {}},
+            priority=0,
+            task_path=task_path,
+            queue_name="default",
+            backend_name="default",
+            exception_class_path="builtins.ValueError",
+            traceback="Traceback: intentional failure",
+            status=TaskResultStatus.FAILED,
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+        )
+
+    @pytest.mark.django_db(transaction=True)
+    def test_requeue_failed_creates_new_task(self, admin_client, backend):
+        """A FAILED row is re-enqueued as a fresh task; the original is untouched."""
+        failed = self._make_failed_row()
+        response = self._post_requeue(admin_client, [failed.id])
+        assert response.status_code == 200
+        assert "Re-enqueued" in response.content.decode()
+
+        rows = DBTaskResult.objects.filter(task_path="tests.tasks.add_numbers")
+        assert rows.count() == 2
+        failed.refresh_from_db()
+        assert failed.status == TaskResultStatus.FAILED  # original untouched
+
+        new_row = rows.exclude(id=failed.id).get()
+        assert new_row.args_kwargs == failed.args_kwargs
+        assert new_row.priority == failed.priority
+        assert new_row.queue_name == failed.queue_name
+
+    @pytest.mark.django_db(transaction=True)
+    def test_requeued_task_executes(self, admin_client, backend):
+        """The re-enqueued task actually runs to completion."""
+        failed = self._make_failed_row(args=[10, 20])
+        self._post_requeue(admin_client, [failed.id])
+
+        new_row = DBTaskResult.objects.filter(
+            task_path="tests.tasks.add_numbers"
+        ).exclude(id=failed.id).get()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            new_row.refresh_from_db()
+            if new_row.status == TaskResultStatus.SUCCESSFUL:
+                break
+            time.sleep(0.05)
+        assert new_row.status == TaskResultStatus.SUCCESSFUL
+        assert new_row.return_value == 30
+
+    @pytest.mark.django_db(transaction=True)
+    def test_requeue_skips_non_failed(self, admin_client, backend):
+        """Rows that are not FAILED are skipped with a warning."""
+        result = add_numbers.enqueue(1, 2)
+        _wait_for_result(result)
+        db_row = DBTaskResult.objects.get(id=result.id)
+        assert db_row.status == TaskResultStatus.SUCCESSFUL
+
+        response = self._post_requeue(admin_client, [db_row.id])
+        content = response.content.decode()
+        assert "Skipped 1 task(s)" in content
+        assert DBTaskResult.objects.count() == 1  # nothing new enqueued
+
+    @pytest.mark.django_db(transaction=True)
+    def test_requeue_unimportable_task_path_errors(self, admin_client, backend):
+        """A FAILED row whose task_path no longer imports reports an error."""
+        failed = self._make_failed_row(task_path="tests.tasks.does_not_exist")
+        response = self._post_requeue(admin_client, [failed.id])
+        content = response.content.decode()
+        assert "Could not re-enqueue" in content
+        assert DBTaskResult.objects.count() == 1
+
+    @pytest.mark.django_db(transaction=True)
+    def test_requeue_requires_change_permission(self, backend):
+        """A user with only view permission does not get the requeue action."""
+        from django.contrib.auth.models import Permission
+
+        user = User.objects.create_user(
+            "viewer", "viewer@test.com", "password", is_staff=True
+        )
+        user.user_permissions.add(
+            Permission.objects.get(codename="view_dbtaskresult")
+        )
+        client = Client()
+        client.force_login(user)
+
+        failed = self._make_failed_row()
+        response = client.get(self.CHANGELIST_URL)
+        assert response.status_code == 200
+        assert 'value="requeue"' not in response.content.decode()
+
+        # And posting the action anyway must not enqueue anything.
+        client.post(
+            self.CHANGELIST_URL,
+            {"action": "requeue", "_selected_action": [str(failed.id)]},
+            follow=True,
+        )
+        assert DBTaskResult.objects.count() == 1
