@@ -7,7 +7,7 @@ from django.tasks import TaskResultStatus, task_backends
 from django.tasks.signals import task_enqueued, task_finished, task_started
 
 from django_tasks_local_db.backend import LocalDBBackend
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import add_numbers, failing_task
 

@@ -1,61 +1,47 @@
 from django.contrib import admin, messages
+from django.contrib.admin.sites import NotRegistered
 from django.core.exceptions import SuspiciousOperation
 from django.tasks import TaskResultStatus
-from django.utils.html import format_html
+from django_tasks_db.admin import DBTaskResultAdmin as BaseDBTaskResultAdmin
+from django_tasks_db.models import DBTaskResult, get_date_max
 
-from .models import DBTaskResult
 
+class DBTaskResultAdmin(BaseDBTaskResultAdmin):
+    """django-tasks-db's admin, plus heartbeat visibility and re-enqueueing."""
 
-@admin.register(DBTaskResult)
-class DBTaskResultAdmin(admin.ModelAdmin):
-    list_display = [
-        "id",
-        "task_name",
-        "status",
-        "enqueued_at",
-        "started_at",
-        "finished_at",
-        "run_after",
+    list_display = (
+        *BaseDBTaskResultAdmin.list_display,
+        "run_after_or_empty",
         "last_heartbeat_at",
-        "priority",
-        "queue_name",
-    ]
-    list_filter = ["status", "priority", "queue_name", "backend_name"]
+    )
+    list_filter = (*BaseDBTaskResultAdmin.list_filter, "backend_name")
     actions = ["requeue"]
-    readonly_fields = [
-        "id",
-        "task_name",
-        "task_path",
-        "status",
-        "enqueued_at",
-        "started_at",
-        "finished_at",
-        "run_after",
-        "last_heartbeat_at",
-        "priority",
-        "queue_name",
-        "backend_name",
-        "args_kwargs",
-        "return_value",
-        "exception_class_path",
-        "formatted_traceback",
-    ]
-    exclude = ["traceback", "worker_ids"]
 
-    def has_add_permission(self, request):
-        return False
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("heartbeat")
 
-    def has_delete_permission(self, request, obj=None):
-        return False
+    def get_readonly_fields(self, request, obj=None):
+        return [*super().get_readonly_fields(request, obj), "last_heartbeat_at"]
 
-    def has_change_permission(self, request, obj=None):
-        return False
+    @admin.display(description="run after", ordering="run_after")
+    def run_after_or_empty(self, obj):
+        # Upstream stores "no run_after" as a far-future sentinel rather than NULL.
+        if obj.run_after == get_date_max():
+            return self.get_empty_value_display()
+        return obj.run_after
+
+    @admin.display(description="last heartbeat at")
+    def last_heartbeat_at(self, obj):
+        try:
+            return obj.heartbeat.last_heartbeat_at
+        except DBTaskResult.heartbeat.RelatedObjectDoesNotExist:
+            return self.get_empty_value_display()
 
     def has_requeue_permission(self, request):
         # Rows stay read-only (has_change_permission is False at the
         # ModelAdmin level), but re-enqueueing is gated on the standard
         # change permission for the model.
-        return request.user.has_perm("django_tasks_local_db.change_dbtaskresult")
+        return request.user.has_perm("django_tasks_database.change_dbtaskresult")
 
     @admin.action(
         description="Re-enqueue as a new task", permissions=["requeue"]
@@ -100,12 +86,12 @@ class DBTaskResultAdmin(admin.ModelAdmin):
                 level=messages.WARNING,
             )
 
-    @admin.display(description="Task name")
-    def task_name(self, obj):
-        return obj.task_name
 
-    @admin.display(description="Traceback")
-    def formatted_traceback(self, obj):
-        if obj.traceback:
-            return format_html("<pre>{}</pre>", obj.traceback)
-        return ""
+# Replace django-tasks-db's registration with ours. Importing
+# django_tasks_db.admin above guarantees upstream registered first,
+# regardless of INSTALLED_APPS order.
+try:
+    admin.site.unregister(DBTaskResult)
+except NotRegistered:
+    pass
+admin.site.register(DBTaskResult, DBTaskResultAdmin)

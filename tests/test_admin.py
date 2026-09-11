@@ -10,7 +10,7 @@ from django.tasks import TaskResultStatus, task_backends
 from django.utils import timezone
 
 from django_tasks_local_db.admin import DBTaskResultAdmin
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import add_numbers, failing_task
 
@@ -55,14 +55,15 @@ class TestAdminMethods:
         result = add_numbers.enqueue(1, 2)
         _wait_for_result(result)
         db_row = DBTaskResult.objects.get(id=result.id)
-        assert admin_instance.task_name(db_row) == "add_numbers"
+        assert "task_name" in admin_instance.list_display
+        assert db_row.task_name == "add_numbers"
 
     @pytest.mark.django_db(transaction=True)
     def test_formatted_traceback_empty(self, admin_instance, backend):
         result = add_numbers.enqueue(1, 2)
         _wait_for_result(result)
         db_row = DBTaskResult.objects.get(id=result.id)
-        assert admin_instance.formatted_traceback(db_row) == ""
+        assert admin_instance.formatted_traceback(db_row) == "-"
 
     @pytest.mark.django_db(transaction=True)
     def test_formatted_traceback_with_content(self, admin_instance, backend):
@@ -93,7 +94,7 @@ class TestAdminViews:
         _wait_for_result(result_ok)
         _wait_for_result(result_fail)
 
-        response = admin_client.get("/admin/django_tasks_local_db/dbtaskresult/")
+        response = admin_client.get("/admin/django_tasks_database/dbtaskresult/")
         assert response.status_code == 200
         content = response.content.decode()
         assert "add_numbers" in content
@@ -111,7 +112,7 @@ class TestAdminViews:
 
         # Filter by SUCCESSFUL
         response = admin_client.get(
-            "/admin/django_tasks_local_db/dbtaskresult/?status=SUCCESSFUL"
+            "/admin/django_tasks_database/dbtaskresult/?status=SUCCESSFUL"
         )
         assert response.status_code == 200
         content = response.content.decode()
@@ -127,12 +128,12 @@ class TestAdminViews:
 
         db_row = DBTaskResult.objects.get(id=result.id)
         response = admin_client.get(
-            f"/admin/django_tasks_local_db/dbtaskresult/{db_row.id}/change/"
+            f"/admin/django_tasks_database/dbtaskresult/{db_row.id}/change/"
         )
         assert response.status_code == 200
         content = response.content.decode()
         assert "add_numbers" in content
-        assert "SUCCESSFUL" in content
+        assert "Successful" in content
 
     @pytest.mark.django_db(transaction=True)
     def test_detail_view_failed_task_shows_traceback(self, admin_client, backend):
@@ -142,11 +143,11 @@ class TestAdminViews:
 
         db_row = DBTaskResult.objects.get(id=result.id)
         response = admin_client.get(
-            f"/admin/django_tasks_local_db/dbtaskresult/{db_row.id}/change/"
+            f"/admin/django_tasks_database/dbtaskresult/{db_row.id}/change/"
         )
         assert response.status_code == 200
         content = response.content.decode()
-        assert "FAILED" in content
+        assert "Failed" in content
         assert "intentional failure" in content
         assert "<pre>" in content
 
@@ -157,7 +158,7 @@ class TestAdminViews:
         deferred = add_numbers.using(run_after=future_time)
         result = deferred.enqueue(1, 2)
 
-        response = admin_client.get("/admin/django_tasks_local_db/dbtaskresult/")
+        response = admin_client.get("/admin/django_tasks_database/dbtaskresult/")
         assert response.status_code == 200
         content = response.content.decode()
         assert "READY" in content
@@ -177,11 +178,10 @@ class TestAdminViews:
             traceback="",
             status=TaskResultStatus.RUNNING,
             started_at=stale_time,
-            last_heartbeat_at=stale_time,
         )
 
         response = admin_client.get(
-            "/admin/django_tasks_local_db/dbtaskresult/?status=RUNNING"
+            "/admin/django_tasks_database/dbtaskresult/?status=RUNNING"
         )
         assert response.status_code == 200
         content = response.content.decode()
@@ -192,7 +192,7 @@ class TestAdminViews:
     def test_requeue_action_listed_for_superuser(self, admin_client, backend):
         result = add_numbers.enqueue(1, 2)
         _wait_for_result(result)
-        response = admin_client.get("/admin/django_tasks_local_db/dbtaskresult/")
+        response = admin_client.get("/admin/django_tasks_database/dbtaskresult/")
         assert response.status_code == 200
         assert 'value="requeue"' in response.content.decode()
 
@@ -212,7 +212,7 @@ class TestAdminViews:
         )
 
         response = admin_client.get(
-            f"/admin/django_tasks_local_db/dbtaskresult/{db_result.id}/change/"
+            f"/admin/django_tasks_database/dbtaskresult/{db_result.id}/change/"
         )
         assert response.status_code == 200
         content = response.content.decode()
@@ -222,7 +222,7 @@ class TestAdminViews:
 class TestRequeueAction:
     """Tests for the 'Re-enqueue as a new task' admin action."""
 
-    CHANGELIST_URL = "/admin/django_tasks_local_db/dbtaskresult/"
+    CHANGELIST_URL = "/admin/django_tasks_database/dbtaskresult/"
 
     @pytest.fixture
     def admin_client(self):

@@ -7,7 +7,7 @@ import pytest
 from django.tasks import TaskResultStatus, task_backends
 
 from django_tasks_local_db.backend import LocalDBBackend
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import add_numbers, failing_task, multiply, noop_task
 
@@ -50,7 +50,7 @@ def test_watcher_dispatches_higher_priority_first(backend):
     )
 
     # Verify the due() queryset returns higher priority first
-    due_ids = list(DBTaskResult.objects.due().values_list("id", flat=True))
+    due_ids = list(DBTaskResult.objects.ready().values_list("id", flat=True))
     assert due_ids.index(high.id) < due_ids.index(low.id), (
         "Higher priority task should appear before lower priority in due() queryset"
     )
@@ -94,7 +94,7 @@ def test_fifo_within_same_priority(backend):
         traceback="",
     )
 
-    due_ids = list(DBTaskResult.objects.due().values_list("id", flat=True))
+    due_ids = list(DBTaskResult.objects.ready().values_list("id", flat=True))
     assert due_ids.index(first.id) < due_ids.index(second.id)
 
 
@@ -349,3 +349,28 @@ def test_check_db_support_rejects_unsupported_db():
 
         with pytest.raises(RuntimeError, match="SELECT FOR UPDATE SKIP LOCKED"):
             backend._check_db_support()
+
+
+# ---------------------------------------------------------------------------
+# Async enqueue (inherited from django-tasks-db)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+def test_aenqueue_is_picked_up_by_watcher(backend):
+    """aenqueue() only has to write the row; the watcher runs it like any other."""
+    from asgiref.sync import async_to_sync
+
+    assert backend.supports_async_task is True
+
+    result = async_to_sync(add_numbers.aenqueue)(2, 3)
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result.refresh()
+        if result.is_finished:
+            break
+        time.sleep(0.05)
+
+    assert result.status == TaskResultStatus.SUCCESSFUL
+    assert result.return_value == 5

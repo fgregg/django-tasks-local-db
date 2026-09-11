@@ -7,7 +7,9 @@ import pytest
 from django.tasks import TaskResultStatus, task_backends
 from django.utils import timezone
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
+
+from django_tasks_local_db.models import TaskHeartbeat
 
 from .tasks import counting_task, get_call_count, reset_call_counts
 
@@ -79,8 +81,8 @@ def test_watcher_recovers_stale_tasks(backend):
         traceback="",
         status=TaskResultStatus.RUNNING,
         started_at=stale_time,
-        last_heartbeat_at=stale_time,
     )
+    TaskHeartbeat.objects.create(task_result=db_result, last_heartbeat_at=stale_time)
 
     # Trigger a watcher tick — should recover the stale task
     backend._watcher_tick()

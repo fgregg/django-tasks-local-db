@@ -6,7 +6,7 @@ import pytest
 from django.tasks import TaskResultStatus, task_backends
 from django.utils import timezone
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import add_numbers
 
@@ -111,7 +111,7 @@ def test_due_queryset_excludes_future_tasks(backend):
         traceback="",
     )
 
-    due_ids = set(str(r.id) for r in DBTaskResult.objects.due())
+    due_ids = set(str(r.id) for r in DBTaskResult.objects.ready())
     assert str(future_task.id) not in due_ids
     assert str(past_task.id) in due_ids
     assert str(no_defer_task.id) in due_ids

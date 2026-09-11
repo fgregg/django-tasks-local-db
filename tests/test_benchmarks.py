@@ -9,7 +9,7 @@ import time
 import pytest
 from django.tasks import TaskResultStatus, task_backends
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import add_numbers, cpu_task, noop_task, slow_task
 

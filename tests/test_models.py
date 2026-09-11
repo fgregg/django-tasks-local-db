@@ -6,7 +6,7 @@ import pytest
 from django.core.exceptions import SuspiciousOperation
 from django.tasks import TaskResultStatus, task_backends
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import add_numbers, failing_task
 
@@ -39,14 +39,14 @@ def test_task_name_returns_task_name(backend):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_task_name_falls_back_to_task_path_on_import_error(backend):
+def test_task_name_falls_back_to_last_path_segment_on_import_error(backend):
     db_row = DBTaskResult.objects.create(
         args_kwargs={"args": [], "kwargs": {}},
         task_path="nonexistent.module.task_func",
         queue_name="default",
         backend_name="default",
     )
-    assert db_row.task_name == "nonexistent.module.task_func"
+    assert db_row.task_name == "task_func"
 
 
 # --- task property raises SuspiciousOperation ---
@@ -106,8 +106,8 @@ def test_queryset_finished_excludes_ready():
 
 
 def test_verbose_name():
-    assert DBTaskResult._meta.verbose_name == "task result"
-    assert DBTaskResult._meta.verbose_name_plural == "task results"
+    assert DBTaskResult._meta.verbose_name == "Task Result"
+    assert DBTaskResult._meta.verbose_name_plural == "Task Results"
 
 
 # --- queue_name index exists ---

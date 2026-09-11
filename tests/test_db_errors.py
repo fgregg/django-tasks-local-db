@@ -8,7 +8,9 @@ from unittest.mock import patch
 import pytest
 from django.tasks import TaskResultStatus, task_backends
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
+
+from django_tasks_local_db.models import TaskHeartbeat
 
 from .tasks import add_numbers, always_fails
 
@@ -128,7 +130,9 @@ def test_stuck_task_recovered_on_restart(backend):
     from django.utils import timezone
 
     stale_time = timezone.now() - timezone.timedelta(seconds=60)
-    DBTaskResult.objects.filter(id=result.id).update(last_heartbeat_at=stale_time)
+    TaskHeartbeat.objects.filter(task_result_id=result.id).update(
+        last_heartbeat_at=stale_time
+    )
 
     # Trigger a watcher tick to recover the stale task
     backend._watcher_tick()

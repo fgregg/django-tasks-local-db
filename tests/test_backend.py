@@ -5,7 +5,9 @@ import pytest
 from django.tasks import TaskResultStatus, task_backends
 from django.tasks.exceptions import TaskResultDoesNotExist
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
+
+from django_tasks_local_db.models import TaskHeartbeat
 from tests.tasks import add_numbers, failing_task, get_task_id
 
 
@@ -146,8 +148,8 @@ def test_watcher_recovers_stale_running_tasks(backend):
         traceback="",
         status=TaskResultStatus.RUNNING,
         started_at=stale_time,
-        last_heartbeat_at=stale_time,
     )
+    TaskHeartbeat.objects.create(task_result=db_result, last_heartbeat_at=stale_time)
 
     backend._ensure_watcher()
     _wait_for_db_result(db_result)

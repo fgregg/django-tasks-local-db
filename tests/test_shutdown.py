@@ -10,7 +10,7 @@ import time
 import pytest
 from django.tasks import TaskResultStatus, task_backends
 
-from django_tasks_local_db.models import DBTaskResult
+from django_tasks_db.models import DBTaskResult
 
 from .tasks import slow_task
 
@@ -89,6 +89,7 @@ def _make_worker_script():
             },
             INSTALLED_APPS=[
                 "django.contrib.contenttypes",
+                "django_tasks_db",
                 "django_tasks_local_db",
             ],
             TASKS={
@@ -107,7 +108,7 @@ def _make_worker_script():
         call_command("migrate", "--run-syncdb", verbosity=0)
 
         from tests.tasks import slow_task
-        from django_tasks_local_db.models import DBTaskResult
+        from django_tasks_db.models import DBTaskResult
         result = slow_task.enqueue(5.0)
         print(f"TASK_ID={result.id}", flush=True)
 
@@ -167,7 +168,7 @@ def test_sigterm_kills_inflight_task():
         port=os.environ.get("PGPORT", "5433"),
     )
     row = conn.execute(
-        "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = %s",
+        "SELECT status FROM django_tasks_database_dbtaskresult WHERE id = %s",
         (task_id,),
     ).fetchone()
     conn.close()
@@ -226,7 +227,7 @@ def test_sigkill_leaves_task_for_recovery():
         port=os.environ.get("PGPORT", "5433"),
     )
     row = conn.execute(
-        "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = %s",
+        "SELECT status FROM django_tasks_database_dbtaskresult WHERE id = %s",
         (task_id,),
     ).fetchone()
     conn.close()
@@ -262,6 +263,7 @@ def _make_enqueue_during_sigterm_script():
             },
             INSTALLED_APPS=[
                 "django.contrib.contenttypes",
+                "django_tasks_db",
                 "django_tasks_local_db",
             ],
             TASKS={
@@ -350,7 +352,7 @@ def test_enqueue_during_sigterm_grace_period():
         port=os.environ.get("PGPORT", "5433"),
     )
     row = conn.execute(
-        "SELECT status FROM django_tasks_local_db_dbtaskresult WHERE id = %s",
+        "SELECT status FROM django_tasks_database_dbtaskresult WHERE id = %s",
         (task_id,),
     ).fetchone()
     conn.close()
