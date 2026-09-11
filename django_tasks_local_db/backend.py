@@ -154,8 +154,9 @@ class LocalDBBackend(DatabaseBackend):
             )
             self._watcher_thread.start()
 
-    def _submit_task(self, result_id, task_path, args, kwargs):
-        """Submit a task to the thread pool."""
+    def _submit_task(self, result_id, task_path, args, kwargs) -> bool:
+        """Submit a task to the thread pool. Returns False if the executor
+        has already been shut down."""
         state = self._get_state()
         try:
             future = state.executor.submit(
@@ -170,12 +171,14 @@ class LocalDBBackend(DatabaseBackend):
             # Executor was shut down between _get_state() and submit().
             # The task stays in RUNNING and will be recovered by heartbeat timeout.
             logger.debug("Executor shut down, task %s will be recovered later", result_id)
-            return
-        with state.lock:
-            state.futures[result_id] = future
-        future.add_done_callback(
-            lambda f, rid=result_id: self._on_complete(rid, f)
-        )
+            return False
+        else:
+            with state.lock:
+                state.futures[result_id] = future
+            future.add_done_callback(
+                lambda f, rid=result_id: self._on_complete(rid, f)
+            )
+            return True
 
     def _on_complete(self, result_id: str, future: Future) -> None:
         from django_tasks_db.models import DBTaskResult
@@ -249,18 +252,16 @@ class LocalDBBackend(DatabaseBackend):
                     task_result=db_result,
                     defaults={"last_heartbeat_at": timezone.now()},
                 )
-                result_id = str(db_result.id)
                 to_submit.append((
-                    result_id,
+                    str(db_result.id),
                     db_result.task_path,
                     tuple(db_result.args_kwargs["args"]),
                     db_result.args_kwargs["kwargs"],
                 ))
-                if log_message:
-                    logger.info(log_message, result_id, db_result.task_path)
 
         for result_id, task_path, args, kwargs in to_submit:
-            self._submit_task(result_id, task_path, args, kwargs)
+            if self._submit_task(result_id, task_path, args, kwargs) and log_message:
+                logger.info(log_message, result_id, task_path)
 
     def _watcher_tick(self):
         """One iteration of the watcher loop."""
