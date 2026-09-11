@@ -8,7 +8,7 @@ from django.tasks.exceptions import TaskResultDoesNotExist
 from django_tasks_db.models import DBTaskResult
 
 from django_tasks_local_db.models import TaskHeartbeat
-from tests.tasks import add_numbers, failing_task, get_task_id
+from tests.tasks import add_numbers, exiting_task, failing_task, get_task_id
 
 
 @pytest.fixture
@@ -193,6 +193,26 @@ def test_failed_task_has_errors_on_task_result(backend):
     error = fetched.errors[0]
     assert error.exception_class_path == "builtins.ValueError"
     assert "intentional failure" in error.traceback
+
+
+@pytest.mark.django_db(transaction=True)
+def test_base_exception_from_task_code_is_recorded_as_failed(backend):
+    """A BaseException raised by the task itself (e.g. sys.exit) is a task
+    failure, not an interruption: it must land in FAILED rather than escape,
+    leave the row RUNNING, and be re-run by heartbeat recovery."""
+    result = exiting_task.enqueue()
+    _wait_for_result(result)
+
+    fetched = exiting_task.get_result(result.id)
+    assert fetched.status == TaskResultStatus.FAILED
+    assert fetched.errors[0].exception_class_path == "builtins.SystemExit"
+
+    db_row = DBTaskResult.objects.get(id=result.id)
+    assert db_row.finished_at is not None
+    assert len(db_row.worker_ids) == 1, "task must not have been re-run"
+    # Not eligible for recovery either.
+    backend._watcher_tick()
+    assert DBTaskResult.objects.get(id=result.id).status == TaskResultStatus.FAILED
 
 
 @pytest.mark.django_db(transaction=True)

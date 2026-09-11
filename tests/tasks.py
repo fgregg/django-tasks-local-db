@@ -33,6 +33,14 @@ def always_fails():
 
 
 @task
+def exiting_task():
+    """Raises SystemExit (a BaseException, not an Exception) from task code."""
+    import sys
+
+    sys.exit(1)
+
+
+@task
 def multiply(a, b):
     return a * b
 

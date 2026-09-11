@@ -61,7 +61,12 @@ def _execute_task(
             else:
                 raw_return_value = task.call(*args, **kwargs)
             return_value = normalize_json(raw_return_value)
-        except Exception as exc:
+        except BaseException as exc:
+            # BaseException, not Exception: signals never reach pool threads,
+            # so a SystemExit/KeyboardInterrupt/CancelledError here was raised
+            # by the task's own code and is a deterministic failure. Letting it
+            # escape would leave the row RUNNING and have heartbeat recovery
+            # re-run it forever.
             task_exc = exc
 
         # Write result — if this fails, the exception propagates
