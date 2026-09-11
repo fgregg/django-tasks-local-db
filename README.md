@@ -48,6 +48,18 @@ python manage.py migrate
 
 Task results live in django-tasks-db's `DBTaskResult` table and show up in the admin under **Tasks Database Backend**, with the heartbeat column and a "Re-enqueue as a new task" action added by this package.
 
+## Running on Cloud Run
+
+Tasks run on background threads inside your web process, and by default Cloud Run only allocates CPU to an instance **while it is handling a request**. Between requests the whole process is throttled to near zero, which stalls both the tasks themselves and the watcher thread that sends their heartbeats. A task enqueued at the end of a request will crawl or freeze until the next request arrives, and if the freeze outlasts `HEARTBEAT_TIMEOUT`, another instance will treat the task as orphaned and run it a second time.
+
+Turn throttling off with CPU always allocated:
+
+```bash
+gcloud run services update SERVICE --no-cpu-throttling
+```
+
+(or **CPU allocation: CPU is always allocated** in the console). This is a separate setting from scaling: an instance with CPU always allocated can still be scaled to zero when idle, at which point it is shut down normally and any in-flight tasks are recovered by heartbeat. If you also want tasks to keep running with no request traffic at all, set `--min-instances=1` so there is always a live process to run the watcher. Both settings together are the usual configuration for a service that relies on this backend.
+
 ## Upgrading from 0.3.x
 
 0.3.x carried its own copy of the `DBTaskResult` model. Add `"django_tasks_db"` to `INSTALLED_APPS` and run `migrate`: migration `0005` copies every row from the old `django_tasks_local_db_dbtaskresult` table into django-tasks-db's table (queued and in-flight tasks included) and then drops the old table. Code that imported `DBTaskResult` from `django_tasks_local_db.models` should import it from `django_tasks_db.models` instead.
