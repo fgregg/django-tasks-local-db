@@ -79,6 +79,12 @@ def _execute_task(
             db_result.set_successful(return_value)
 
 
+# Heartbeats are written once per watcher tick, so a task is only "stale"
+# after this many consecutive ticks without one. Below this, a single slow
+# tick could get a live task recovered and run twice.
+MIN_HEARTBEAT_TIMEOUT_TICKS = 3
+
+
 class LocalDBBackend(DatabaseBackend):
     """django-tasks-db's DatabaseBackend, plus an in-process thread pool
     that dispatches due tasks and recovers orphaned ones."""
@@ -107,6 +113,20 @@ class LocalDBBackend(DatabaseBackend):
                     f"{type(self).__name__} configured as task backend, "
                     "but django_tasks_local_db app not installed",
                     "Insert 'django_tasks_local_db' in INSTALLED_APPS",
+                )
+            )
+        min_timeout = MIN_HEARTBEAT_TIMEOUT_TICKS * self._poll_interval
+        if self._heartbeat_timeout < min_timeout:
+            errors.append(
+                checks.Error(
+                    f"HEARTBEAT_TIMEOUT ({self._heartbeat_timeout}s) is less than "
+                    f"{MIN_HEARTBEAT_TIMEOUT_TICKS} x POLL_INTERVAL "
+                    f"({self._poll_interval}s) for task backend '{self.alias}'. "
+                    "Heartbeats are sent once per poll, so live tasks would be "
+                    "treated as orphaned and run again.",
+                    f"Set HEARTBEAT_TIMEOUT to at least {min_timeout:g}s, or "
+                    "lower POLL_INTERVAL.",
+                    id="django_tasks_local_db.E001",
                 )
             )
         return errors

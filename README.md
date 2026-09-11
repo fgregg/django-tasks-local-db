@@ -40,6 +40,8 @@ TASKS = {
 }
 ```
 
+Heartbeats are written once per poll, so `HEARTBEAT_TIMEOUT` must be at least 3 × `POLL_INTERVAL`; `manage.py check` reports an error otherwise. The heartbeat records that the process which claimed a task is still alive and still has it in flight, not that the task is making progress: a task that hangs keeps its heartbeat until its process exits.
+
 Then run migrations:
 
 ```bash

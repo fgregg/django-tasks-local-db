@@ -330,6 +330,35 @@ def test_validate_rejects_non_module_level_task(backend):
 
 
 # ---------------------------------------------------------------------------
+# System checks
+# ---------------------------------------------------------------------------
+
+
+def _backend_with_options(**options):
+    return LocalDBBackend("default", {
+        "BACKEND": "django_tasks_local_db.LocalDBBackend",
+        "OPTIONS": options,
+    })
+
+
+def test_check_passes_with_defaults():
+    assert _backend_with_options().check() == []
+
+
+def test_check_rejects_heartbeat_timeout_too_short_for_poll_interval():
+    """A timeout shorter than a few polls would recover live tasks: heartbeats
+    are only written once per poll."""
+    errors = _backend_with_options(POLL_INTERVAL=30, HEARTBEAT_TIMEOUT=30).check()
+    assert [e.id for e in errors] == ["django_tasks_local_db.E001"]
+    assert "HEARTBEAT_TIMEOUT (30s)" in errors[0].msg
+    assert "at least 90s" in errors[0].hint
+
+
+def test_check_accepts_heartbeat_timeout_at_minimum_ratio():
+    assert _backend_with_options(POLL_INTERVAL=10, HEARTBEAT_TIMEOUT=30).check() == []
+
+
+# ---------------------------------------------------------------------------
 # Async enqueue (inherited from django-tasks-db)
 # ---------------------------------------------------------------------------
 
