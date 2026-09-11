@@ -6,7 +6,7 @@ from typing import Any
 
 from django.apps import apps
 from django.core import checks
-from django.db import close_old_connections, transaction
+from django.db import close_old_connections
 from django.tasks.base import TaskContext
 from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
@@ -14,6 +14,7 @@ from django.utils.crypto import get_random_string
 from django.utils.json import normalize_json
 from django.utils.module_loading import import_string
 from django_tasks_db.backend import DatabaseBackend
+from django_tasks_db.utils import exclusive_transaction
 
 from .state import get_executor_state, shutdown_executor
 
@@ -110,20 +111,8 @@ class LocalDBBackend(DatabaseBackend):
             )
         return errors
 
-    def _check_db_support(self):
-        from django.db import connection
-
-        if not connection.features.has_select_for_update_skip_locked:
-            raise RuntimeError(
-                f"LocalDBBackend requires a database that supports "
-                f"SELECT FOR UPDATE SKIP LOCKED (e.g. PostgreSQL, MySQL). "
-                f"The current database engine ({connection.vendor}) does not "
-                f"support row-level locking."
-            )
-
     def _get_state(self):
         if self._state is None:
-            self._check_db_support()
             self._state = get_executor_state(
                 name=self._name,
                 executor_class=self.executor_class,
@@ -225,8 +214,11 @@ class LocalDBBackend(DatabaseBackend):
         if available <= 0:
             return
 
+        # Same claim strategy as db_worker: SKIP LOCKED where the database
+        # has it, silently ignored on SQLite where exclusive_transaction
+        # serialises claimers instead.
         to_submit = []
-        with transaction.atomic():
+        with exclusive_transaction(queryset.db):
             rows = (
                 queryset.filter(backend_name=self.alias)
                 .select_for_update(skip_locked=True)[:available]

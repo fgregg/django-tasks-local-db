@@ -330,28 +330,6 @@ def test_validate_rejects_non_module_level_task(backend):
 
 
 # ---------------------------------------------------------------------------
-# _check_db_support (SQLite rejection)
-# ---------------------------------------------------------------------------
-
-
-def test_check_db_support_rejects_unsupported_db():
-    """LocalDBBackend should reject databases without SELECT FOR UPDATE
-    SKIP LOCKED support (e.g., SQLite)."""
-    from unittest.mock import patch
-
-    backend = LocalDBBackend("test", {
-        "BACKEND": "django_tasks_local_db.LocalDBBackend",
-    })
-
-    with patch("django.db.connection") as mock_conn:
-        mock_conn.features.has_select_for_update_skip_locked = False
-        mock_conn.vendor = "sqlite"
-
-        with pytest.raises(RuntimeError, match="SELECT FOR UPDATE SKIP LOCKED"):
-            backend._check_db_support()
-
-
-# ---------------------------------------------------------------------------
 # Async enqueue (inherited from django-tasks-db)
 # ---------------------------------------------------------------------------
 

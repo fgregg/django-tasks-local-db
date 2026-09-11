@@ -11,7 +11,7 @@ This project is a remix of [django-tasks-local](https://github.com/lincolnloop/d
 - On completion, the DB row is updated with the result or error
 - A `RUNNING` task whose heartbeat has gone silent (e.g. the process died) is recovered and re-run by any live process
 
-Requires a database that supports `SELECT ... FOR UPDATE SKIP LOCKED` (PostgreSQL, MySQL 8+).
+Tasks are claimed the same way django-tasks-db's `db_worker` claims them (`SELECT ... FOR UPDATE SKIP LOCKED` where available, an exclusive transaction on SQLite), so any database django-tasks-db supports works.
 
 ## Installation
 

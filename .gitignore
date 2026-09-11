@@ -7,5 +7,5 @@ build/
 .venv/
 *.egg
 .pytest_cache/
-db.sqlite3
+*.sqlite3
 django_tasks_test_*/
