@@ -58,7 +58,7 @@ Turn throttling off with CPU always allocated:
 gcloud run services update SERVICE --no-cpu-throttling
 ```
 
-(or **CPU allocation: CPU is always allocated** in the console). This is a separate setting from scaling: an instance with CPU always allocated can still be scaled to zero when idle, at which point it is shut down normally and any in-flight tasks are recovered by heartbeat. If you also want tasks to keep running with no request traffic at all, set `--min-instances=1` so there is always a live process to run the watcher. Both settings together are the usual configuration for a service that relies on this backend.
+(or **CPU allocation: CPU is always allocated** in the console). This is a separate setting from scaling: an instance with CPU always allocated can still be scaled to zero when idle, at which point it is shut down normally and any in-flight tasks are recovered by heartbeat. If you also want tasks to keep running with no request traffic at all, set `--min-instances=1` so there is always a live process to run the watcher.
 
 ## Upgrading from 0.3.x
 
