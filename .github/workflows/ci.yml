@@ -56,7 +56,7 @@ jobs:
           pip install -e ".[dev,postgres]"
       - name: Install django-tasks-db from main
         if: matrix.django-tasks-db == 'main'
-        run: pip install --upgrade "git+https://github.com/RealOrangeOne/django-tasks-db.git@main"
+        run: pip install --upgrade "git+https://github.com/RealOrangeOne/django-tasks-db.git@master"
       - name: Run tests (PostgreSQL)
         run: python -m pytest tests/ -v
       - name: Run tests (SQLite)
