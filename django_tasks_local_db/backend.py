@@ -171,7 +171,6 @@ class LocalDBBackend(DatabaseBackend):
             # Executor was shut down between _get_state() and submit().
             # The task stays in RUNNING and will be recovered by heartbeat timeout.
             logger.debug("Executor shut down, task %s will be recovered later", result_id)
-            return False
         else:
             with state.lock:
                 state.futures[result_id] = future
@@ -179,6 +178,7 @@ class LocalDBBackend(DatabaseBackend):
                 lambda f, rid=result_id: self._on_complete(rid, f)
             )
             return True
+        return False
 
     def _on_complete(self, result_id: str, future: Future) -> None:
         from django_tasks_db.models import DBTaskResult
