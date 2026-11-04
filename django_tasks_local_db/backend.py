@@ -1,37 +1,26 @@
+import contextlib
 import logging
 import threading
-from contextlib import contextmanager
+
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from django.apps import apps
 from django.core import checks
-from django.db import close_old_connections
 from django.tasks.base import TaskContext
 from django.tasks.signals import task_finished, task_started
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 from django.utils.json import normalize_json
 from django.utils.module_loading import import_string
+
 from django_tasks_db.backend import DatabaseBackend
 from django_tasks_db.utils import exclusive_transaction
 
 from .state import get_executor_state, shutdown_executor
 
+
 logger = logging.getLogger("django_tasks_local_db")
-
-
-@contextmanager
-def _db_connection():
-    """Ensure stale connections are cleaned up on entry,
-    and the thread-local connection is closed on exit."""
-    from django.db import connection
-
-    close_old_connections()
-    try:
-        yield
-    finally:
-        connection.close()
 
 
 def _execute_task(
@@ -42,9 +31,11 @@ def _execute_task(
     backend_name: str,
 ):
     """Execute a task function. Runs in the thread pool."""
+    from django.db import close_old_connections, connection
     from django_tasks_db.models import DBTaskResult
 
-    with _db_connection():
+    close_old_connections()
+    with contextlib.closing(connection):
         db_result = DBTaskResult.objects.get(id=result_id)
 
         task = import_string(func_path)
@@ -53,7 +44,6 @@ def _execute_task(
 
         task_started.send(sender=backend_type, task_result=task_result)
 
-        task_exc = None
         try:
             if task.takes_context:
                 raw_return_value = task.call(
@@ -68,14 +58,10 @@ def _execute_task(
             # by the task's own code and is a deterministic failure. Letting it
             # escape would leave the row RUNNING and have heartbeat recovery
             # re-run it forever.
-            task_exc = exc
-
-        # Write result — if this fails, the exception propagates
-        # and _on_complete logs a warning.
-        db_result.refresh_from_db()
-        if task_exc is not None:
-            db_result.set_failed(task_exc)
+            db_result.refresh_from_db()
+            db_result.set_failed(exc)
         else:
+            db_result.refresh_from_db()
             db_result.set_successful(return_value)
 
 
@@ -99,6 +85,7 @@ class LocalDBBackend(DatabaseBackend):
         self._heartbeat_timeout = options.get("HEARTBEAT_TIMEOUT", 30)
         self._name = f"tasks-{alias}"
         self._worker_id = get_random_string(32)
+        self._closed = False
         self._state = None
         self._watcher_started = False
         self._watcher_stop = threading.Event()
@@ -132,7 +119,7 @@ class LocalDBBackend(DatabaseBackend):
         return errors
 
     def _get_state(self):
-        if self._state is None:
+        if self._state is None and self._closed is False:
             self._state = get_executor_state(
                 name=self._name,
                 executor_class=self.executor_class,
@@ -145,7 +132,7 @@ class LocalDBBackend(DatabaseBackend):
         with self._watcher_lock:
             if self._watcher_started:
                 return
-            self._watcher_started = True
+            self._closed = False
             self._watcher_stop.clear()
             self._watcher_thread = threading.Thread(
                 target=self._watcher_loop,
@@ -153,6 +140,41 @@ class LocalDBBackend(DatabaseBackend):
                 name=f"tasks-watcher-{self.alias}",
             )
             self._watcher_thread.start()
+            self._watcher_started = True
+
+    def _on_complete(self, result_id: str, future: Future) -> None:
+        from django.db import close_old_connections, connection
+        from django_tasks_db.models import DBTaskResult
+
+        try:
+            exc = future.exception()
+            if exc is not None:
+                logger.warning(
+                    "Task %s completed but failed to write result to DB. "
+                    "Task will be stuck in RUNNING until recovered.",
+                    result_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                return
+
+            close_old_connections()
+            try:
+                db_result = DBTaskResult.objects.get(id=result_id)
+            except Exception:
+                logger.exception("Failed to get db_result for: %s", result_id)
+            else:
+                with contextlib.suppress(Exception):
+                    task_finished.send(
+                        sender=type(self), task_result=db_result.task_result
+                    )
+
+        finally:
+            state = self._get_state()
+            if state is not None:
+                with state.lock:
+                    state.futures.pop(result_id, None)
+                state.semaphore.release()
+            connection.close()
 
     def _submit_task(self, result_id, task_path, args, kwargs) -> bool:
         """Submit a task to the thread pool. Returns False if the executor
@@ -171,7 +193,6 @@ class LocalDBBackend(DatabaseBackend):
             # Executor was shut down between _get_state() and submit().
             # The task stays in RUNNING and will be recovered by heartbeat timeout.
             logger.debug("Executor shut down, task %s will be recovered later", result_id)
-            return False
         else:
             with state.lock:
                 state.futures[result_id] = future
@@ -179,89 +200,51 @@ class LocalDBBackend(DatabaseBackend):
                 lambda f, rid=result_id: self._on_complete(rid, f)
             )
             return True
-
-    def _on_complete(self, result_id: str, future: Future) -> None:
-        from django_tasks_db.models import DBTaskResult
-
-        with _db_connection():
-            try:
-                exc = future.exception()
-                if exc is not None:
-                    logger.warning(
-                        "Task %s completed but failed to write result to DB. "
-                        "Task will be stuck in RUNNING until recovered.",
-                        result_id,
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
-                    return
-
-                try:
-                    db_result = DBTaskResult.objects.get(id=result_id)
-                    task_finished.send(
-                        sender=type(self), task_result=db_result.task_result
-                    )
-                except Exception:
-                    pass
-            finally:
-                if self._state is not None:
-                    with self._state.lock:
-                        self._state.futures.pop(result_id, None)
-
-    def _watcher_loop(self):
-        """Background loop: dispatch due tasks, update heartbeats, recover stale tasks."""
-        # Brief delay to ensure Django startup completes
-        self._watcher_stop.wait(timeout=0.5)
-
-        with _db_connection():
-            while not self._watcher_stop.is_set():
-                try:
-                    self._watcher_tick()
-                except Exception:
-                    logger.exception("Error in watcher loop for backend '%s'", self.alias)
-
-                self._watcher_stop.wait(timeout=self._poll_interval)
-
-    def _available_slots(self):
-        """How many more tasks can be submitted to the thread pool."""
-        state = self._get_state()
-        with state.lock:
-            inflight = len(state.futures)
-        return max(0, self._max_workers - inflight)
+        return False
 
     def _claim_and_submit(self, queryset, log_message=None):
-        """Lock up to `available` rows from `queryset`, claim them for this
-        worker, then submit them to the thread pool once the lock is released."""
+        """Lock rows from `queryset`, claim them for this worker,
+        then submit them to the thread pool once the lock is released."""
         from .models import TaskHeartbeat
 
-        available = self._available_slots()
-        if available <= 0:
-            return
+        state = self._get_state()
+        submitted = True
 
         # Same claim strategy as db_worker: SKIP LOCKED where the database
         # has it, silently ignored on SQLite where exclusive_transaction
         # serialises claimers instead.
-        to_submit = []
-        with exclusive_transaction(queryset.db):
-            rows = (
-                queryset.filter(backend_name=self.alias)
-                .select_for_update(skip_locked=True)[:available]
-            )
-            for db_result in rows:
-                db_result.claim(self._worker_id)
-                TaskHeartbeat.objects.update_or_create(
-                    task_result=db_result,
-                    defaults={"last_heartbeat_at": timezone.now()},
-                )
-                to_submit.append((
+        rows = queryset.filter(backend_name=self.alias)
+        while submitted and state.semaphore.acquire(blocking=False):
+            with exclusive_transaction(queryset.db):
+                db_result = rows.select_for_update(skip_locked=True).first()
+                if db_result is None:
+                    submitted = False
+                else:
+                    db_result.claim(self._worker_id)
+                    TaskHeartbeat.objects.update_or_create(
+                        task_result=db_result,
+                        defaults={"last_heartbeat_at": timezone.now()},
+                    )
+                if submitted is False:
+                    state.semaphore.release()
+                    break
+
+            try:
+                submitted = self._submit_task(
                     str(db_result.id),
                     db_result.task_path,
                     tuple(db_result.args_kwargs["args"]),
                     db_result.args_kwargs["kwargs"],
-                ))
+                )
+            except BaseException:
+                submitted = False
+            else:
+                if submitted and log_message:
+                    logger.info(log_message, result_id, task_path)
 
-        for result_id, task_path, args, kwargs in to_submit:
-            if self._submit_task(result_id, task_path, args, kwargs) and log_message:
-                logger.info(log_message, result_id, task_path)
+            finally:
+                if not submitted:
+                    state.semaphore.release()
 
     def _watcher_tick(self):
         """One iteration of the watcher loop."""
@@ -288,12 +271,36 @@ class LocalDBBackend(DatabaseBackend):
             log_message="Recovered stale task %s (%s)",
         )
 
+    def _watcher_loop(self):
+        """Background loop: dispatch due tasks, update heartbeats, recover stale tasks."""
+        from django.db import close_old_connections, connection
+
+        # Brief delay to ensure Django startup completes
+        self._watcher_stop.wait(timeout=0.5)
+
+        try:
+            while not self._watcher_stop.is_set():
+                try:
+                    close_old_connections()
+                    self._watcher_tick()
+                except Exception:
+                    logger.exception("Error in watcher loop for backend '%s'", self.alias)
+
+                finally:
+                    connection.close()
+                    self._watcher_stop.wait(timeout=self._poll_interval)
+
+        finally:
+            with self._watcher_lock:
+                self._watcher_started = False
+
     def close(self):
         with self._watcher_lock:
             self._watcher_stop.set()
             if self._watcher_thread is not None:
                 self._watcher_thread.join()
                 self._watcher_thread = None
+            self._closed = True
             self._watcher_started = False
         shutdown_executor(self._name)
         self._state = None
