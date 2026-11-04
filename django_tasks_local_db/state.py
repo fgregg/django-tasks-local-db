@@ -1,7 +1,7 @@
 from collections import deque
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Lock, Semaphore
 
 @dataclass
 class ExecutorState:
@@ -9,6 +9,7 @@ class ExecutorState:
     futures: dict[str, Future] = field(default_factory=dict)
     completed_ids: deque[str] = field(default_factory=deque)
     lock: Lock = field(default_factory=Lock)
+    semaphore: Semaphore
 
 
 _executor_states: dict[str, ExecutorState] = {}
@@ -22,6 +23,7 @@ def get_executor_state(
         if name not in _executor_states:
             _executor_states[name] = ExecutorState(
                 executor=executor_class(max_workers=max_workers),
+                semaphore=Semaphore(value=max_workers),
             )
         return _executor_states[name]
 
